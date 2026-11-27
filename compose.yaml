@@ -1,0 +1,22 @@
+# RELIF at home: `docker compose up -d --build` (first time: `docker compose run --rm relif init`).
+# The capture page is published on the laptop only (127.0.0.1:8765). For your phone from anywhere, add the
+# Tailscale sidecar: `docker compose -f compose.yaml -f compose.tailscale.yaml up -d` (see README).
+services:
+  relif:
+    build:
+      context: .
+      args:
+        UID: ${RELIF_UID:-1000}
+        GID: ${RELIF_GID:-1000}
+    image: relif:local
+    restart: unless-stopped
+    environment:
+      RELIF_PUBLIC_URL: ${RELIF_PUBLIC_URL:-}
+    volumes:
+      - ${RELIF_HOME:-~/.relif}:/data
+    ports:
+      - "127.0.0.1:8765:8765"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]   # runs as your uid; no-new-privileges is left out: it breaks exec on snap Docker

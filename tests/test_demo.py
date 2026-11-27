@@ -3,6 +3,7 @@ import io
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -137,13 +138,42 @@ class PageTest(unittest.TestCase):
         self.assertEqual(self.files["app.py"], (ROOT / "demo/app.py").read_text())
 
     def test_embedded_json_cannot_close_the_script_tag(self):
-        self.assertEqual(self.html.count("</script>"), 2)
+        self.assertEqual(self.html.count("</script>"), 3)   # home link, stlite mount, files
 
     def test_only_the_pinned_stlite_cdn_is_loaded(self):
         hosts = set(re.findall(r'https?://([^/"\'\s)]+)', self.html.split('id="relif-files"')[0]))
         self.assertEqual(hosts, {"cdn.jsdelivr.net"})
         self.assertIn(f"@stlite/browser@{demo.STLITE_VERSION}/", self.html)
         self.assertRegex(demo.STLITE_VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_home_link_bakes_in_no_server_address(self):
+        head = self.html.split('id="relif-files"')[0]
+        self.assertNotRegex(head, r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net")   # only the *.ts.net rule, no tailnet name
+        self.assertIn("location.hash", head)
+        self.assertIn('credentials: "omit"', head)
+        self.assertNotIn("innerHTML", head)
+        self.assertIn("new URL(origin).hostname", head)   # the page names the server, so a crafted link shows its host
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_home_link_accepts_only_https_tailnet_origins(self):
+        js = re.search(r"(function relifServer\(hash\) \{.*?\n\})", self.html, re.S).group(1)
+        cases = {
+            "#server=https://relif.tail1234.ts.net": "https://relif.tail1234.ts.net",
+            "#server=https%3A%2F%2Frelif.tail1234.ts.net%2F": "https://relif.tail1234.ts.net",
+            "#a=1&server=https://relif.tail1234.ts.net": "https://relif.tail1234.ts.net",
+            "#server=http://relif.tail1234.ts.net": None,
+            "#server=https://evil.example": None,
+            "#server=https://relif.ts.net.evil.example": None,
+            "#server=https://user@relif.tail1234.ts.net": None,
+            "#server=https://relif.tail1234.ts.net/login": None,
+            "#server=javascript:alert(1)": None,
+            "#server=": None,
+            "": None,
+            "#other=1": None,
+        }
+        prog = js + "\nconsole.log(JSON.stringify(" + json.dumps(list(cases)) + ".map(relifServer)));"
+        out = subprocess.run(["node", "-e", prog], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(dict(zip(cases, json.loads(out))), cases)
 
     def test_page_keeps_nothing_in_browser_storage(self):
         script = self.html.split('id="relif-files"')[0]

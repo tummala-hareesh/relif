@@ -62,6 +62,43 @@ python3 -m relif serve --lan                                      # home Wi-Fi /
 
 Tests: `python3 -m unittest discover -s tests`. Install as a command: `pipx install .`
 
+## Run it at home (Docker)
+
+The capture server needs a machine (GitHub Pages only serves static files), so it runs on your laptop in
+Docker, restarts on its own and keeps the store in a normal host folder: `relif verify`, `export` and
+`backup` keep working from the host CLI.
+
+```bash
+cp .env.example .env                       # set RELIF_UID/RELIF_GID to `id -u` / `id -g`
+mkdir -p ~/.relif                          # create it yourself, or Docker makes it root-owned
+docker compose run --rm relif init         # once, if ~/.relif has no store yet
+docker compose up -d --build               # http://127.0.0.1:8765 on this laptop only
+xdg-open "http://127.0.0.1:8765/pair?t=$(cat ~/.relif/serve.token)"   # pair this browser
+```
+
+**Phone, from anywhere (Tailscale, recommended).** The sidecar makes the server its own tailnet node `relif`
+with a real HTTPS certificate. Only devices on your tailnet can reach it (`serve`, never `funnel`), and no host
+port is published. Put a tagged, non-reusable, pre-approved `TS_AUTHKEY` and
+`RELIF_PUBLIC_URL=https://relif.<your-tailnet>.ts.net` in `.env` (never commit it), then:
+
+```bash
+docker compose -f compose.yaml -f compose.tailscale.yaml up -d --build
+docker compose -f compose.yaml -f compose.tailscale.yaml logs relif   # pairing link + phone bookmark
+```
+
+With `--public-url` (here `RELIF_PUBLIC_URL`) the pairing link is HTTPS, the cookie is `Secure`, and any
+other `Host` header gets `421` (this also blocks DNS rebinding). `GET /health` is the one route that needs
+no pairing: it returns only `{"ok": true, "version": ...}`, and only the Pages demo origin may read it.
+
+**Open it from the demo page.** `relif serve` prints a bookmark like
+`https://tummala-hareesh.github.io/relif-demo/#server=https://relif.<your-tailnet>.ts.net`. The address
+rides in the URL fragment, which browsers never send to GitHub, so it is not in the public page or its logs.
+The page then shows 🟢 *Open my RELIF* or 😴 *laptop asleep or off your tailnet* within 3 seconds. Only
+`https://*.ts.net` addresses are accepted, so a crafted link can't turn the page into a redirect.
+
+**Keep the laptop awake.** `restart: unless-stopped` brings the server back after a reboot, but a sleeping
+laptop can't answer. Disable suspend on AC power (or keep the lid open) when you want to log from your phone.
+
 ## Try the verdict in a browser (demo page)
 
 The "is this deductible?" questions also run as a static page: Streamlit in the browser via

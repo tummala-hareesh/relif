@@ -1,12 +1,16 @@
 """`relif serve`: a thin, local phone capture page over Store + the verdict engine (stdlib only).
 
-Security rules: binds 127.0.0.1 unless --lan; every page needs the pairing cookie; POSTs need a CSRF token;
+Security rules: binds 127.0.0.1 unless --lan/--host; every page needs the pairing cookie; POSTs need a CSRF token;
 request bodies are size-capped; there are no edit or delete routes (corrections stay void + re-add in the CLI).
+Behind HTTPS (`--public-url`, e.g. Tailscale serve) the cookie is `Secure` and any other Host header gets 421,
+which also blocks DNS rebinding. `GET /health` is the one unauthenticated route: `{"ok", "version"}` only, no
+ledger data, readable cross-origin by the Pages demo origin alone.
 """
 from __future__ import annotations
 
 import hmac
 import html
+import json
 import os
 import secrets
 import shutil
@@ -23,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from . import __version__
 from .capture import answers_for, log_expense
 from .money import format_cents, parse_cents
 from .store import RelifError, Store
@@ -33,6 +38,9 @@ TOKEN_FILE = "serve.token"
 REQUEST_TIMEOUT = 30  # seconds per socket read: a stalled client can't hold a thread forever
 DEFAULT_PORT = 8765
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
+PAGES_ORIGIN = "https://tummala-hareesh.github.io"   # the public demo page; the only CORS origin, /health only
+PAGES_DEMO = PAGES_ORIGIN + "/relif-demo/"
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}   # container healthcheck / same machine
 _SAFE_NAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
@@ -50,6 +58,37 @@ STYLE = ("body{font:16px/1.4 system-ui,sans-serif;margin:0 auto;max-width:34rem;
 
 def csrf_token(token: str) -> str:
     return hmac.new(token.encode(), b"relif-csrf", sha256).hexdigest()
+
+
+def validate_public_url(url: str) -> str:
+    """The https origin the server is reached at, normalised (lower-case, no trailing slash). ValueError if not."""
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        raise ValueError(f"--public-url is not a URL: {url!r}") from None
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError("--public-url must be an https:// address, e.g. https://relif.<tailnet>.ts.net")
+    if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment \
+            or "#" in url or "?" in url:
+        raise ValueError("--public-url must be just scheme and host (no path, query, login or fragment)")
+    host = parts.hostname.lower()
+    host = f"[{host}]" if ":" in host else host
+    return f"https://{host}" + (f":{port}" if port and port != 443 else "")
+
+
+def pages_bookmark(public_url: str) -> str:
+    """The Pages demo link that knows this server. The address rides in the fragment: never sent to GitHub."""
+    return f"{PAGES_DEMO}#server={public_url}"
+
+
+def _host_name(host_header: str) -> str:
+    """Host header without the port, lower-case ('' if missing or malformed)."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[:end + 1] if end > 0 else ""
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
 def _e(value) -> str:
@@ -105,7 +144,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
     # ---- plumbing ------------------------------------------------------------------------
     def log_message(self, fmt, *args):  # never log the pairing token in the query string
-        if not self.server.quiet:
+        if not self.server.quiet and urlsplit(self.path).path != "/health":  # healthchecks every 30 s
             sys.stderr.write(f"{self.address_string()} {self.command} {urlsplit(self.path).path}\n")
 
     def send(self, status: int, body: bytes = b"", ctype="text/html; charset=utf-8", headers=None, close=False):
@@ -123,6 +162,11 @@ class CaptureHandler(BaseHTTPRequestHandler):
     def fail(self, status: int, message: str, close=False):
         self.send(status, _page(message, f"<h1>{_e(status)}</h1><p>{_e(message)}</p>"), close=close)
 
+    def host_ok(self) -> bool:
+        if not self.server.allowed_hosts:
+            return True
+        return _host_name(self.headers.get("Host", "")) in self.server.allowed_hosts
+
     def authed(self) -> bool:
         try:
             jar = SimpleCookie(self.headers.get("Cookie", ""))
@@ -136,12 +180,20 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
     # ---- routes --------------------------------------------------------------------------
     def do_GET(self):
+        if not self.host_ok():
+            return self.fail(421, "Wrong address for this RELIF server.", close=True)
         url = urlsplit(self.path)
+        if url.path == "/health":
+            body = json.dumps({"ok": True, "version": __version__}).encode()
+            return self.send(200, body, "application/json",
+                             headers={"Access-Control-Allow-Origin": PAGES_ORIGIN, "Vary": "Origin"})
         if url.path == "/pair":
             given = (parse_qs(url.query).get("t") or [""])[0]
             if not hmac.compare_digest(given.encode(), self.server.token.encode()):
                 return self.fail(401, "Pairing link is not valid. Use the link printed by `relif serve`.")
             cookie = f"{COOKIE}={self.server.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000"
+            if self.server.public_url:
+                cookie += "; Secure"
             return self.send(303, b"", headers={"Location": "/", "Set-Cookie": cookie})
         if not self.authed():
             return self.fail(401, "Not paired. Open the pairing link printed by `relif serve`.")
@@ -155,6 +207,8 @@ class CaptureHandler(BaseHTTPRequestHandler):
         self.fail(404, "Not found")
 
     def do_POST(self):
+        if not self.host_ok():
+            return self.fail(421, "Wrong address for this RELIF server.", close=True)
         if not self.authed():
             return self.fail(401, "Not paired.", close=True)
         if urlsplit(self.path).path != "/add":
@@ -198,6 +252,15 @@ class CaptureHandler(BaseHTTPRequestHandler):
             self.fail(400, str(exc))
         except (sqlite3.Error, OSError) as exc:
             self.fail(500, f"store error: {type(exc).__name__}")
+
+    def do_OPTIONS(self):  # CORS / Local Network Access preflight, for /health only
+        if not self.host_ok():
+            return self.fail(421, "Wrong address for this RELIF server.", close=True)
+        if urlsplit(self.path).path != "/health":
+            return self.fail(405, "Not allowed.", close=True)
+        self.send(204, headers={"Access-Control-Allow-Origin": PAGES_ORIGIN, "Access-Control-Allow-Methods": "GET",
+                                "Access-Control-Allow-Private-Network": "true", "Access-Control-Max-Age": "600",
+                                "Vary": "Origin"})
 
     def do_PUT(self):
         self.fail(405, "Entries cannot be changed. Void and re-add with the CLI.", close=True)
@@ -306,8 +369,12 @@ class CaptureHandler(BaseHTTPRequestHandler):
 class CaptureServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, home, address, token: str, max_bytes: int, quiet: bool = False):
+    def __init__(self, home, address, token: str, max_bytes: int, quiet: bool = False, public_url: str = None):
         self.home = Path(home)
+        self.public_url = validate_public_url(public_url) if public_url else None
+        self.allowed_hosts = ({_host_name(urlsplit(self.public_url).netloc)} | _LOCAL_HOSTS) if self.public_url else set()
+        if ":" in address[0]:
+            self.address_family = socket.AF_INET6
         self.quiet = quiet
         self.token = token
         self.max_bytes = max_bytes
@@ -333,9 +400,9 @@ def pairing_token(home, *, rotate: bool = False) -> str:
 
 
 def make_server(home, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT, token: str = None,
-                max_bytes: int = DEFAULT_MAX_BYTES, quiet: bool = False) -> CaptureServer:
+                max_bytes: int = DEFAULT_MAX_BYTES, quiet: bool = False, public_url: str = None) -> CaptureServer:
     Store(home).close()  # fail fast if there is no store
-    return CaptureServer(home, (host, port), token or pairing_token(home), max_bytes, quiet)
+    return CaptureServer(home, (host, port), token or pairing_token(home), max_bytes, quiet, public_url)
 
 
 def lan_address() -> str:
