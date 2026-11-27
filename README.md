@@ -39,4 +39,24 @@ python3 -m relif backup && python3 -m relif restore-test # via restic, if config
 - **Backup:** delegated to [restic](https://restic.net) (`RESTIC_REPOSITORY` + password); suggested
   policy `restic forget --keep-monthly 24 --keep-yearly 10 --dry-run`.
 
+## Ask and capture (v0.2)
+
+```bash
+python3 -m relif ask --kind repair --work restores               # cited verdict only
+python3 -m relif ask --kind utilities --use shared --property 1 \
+    --amount 120 --vendor Hydro -r ~/scans/hydro.pdf               # verdict + ledger entry
+python3 -m relif serve                                            # phone capture page on localhost
+python3 -m relif serve --lan                                      # home Wi-Fi / Tailscale (opt-in)
+```
+
+- **Verdicts** (`relif/verdict.py`): a pure decision tree over the 8 questions (use, availability, kind,
+  interest vs principal, current vs capital, personal share, short-term rental compliance, profit). Outcomes:
+  current (T776 line), capital (CCA class), partial (rental %), not deductible, unsure (ask an accountant).
+  Every verdict cites CRA T4036 and lists its assumptions. Not tax advice.
+- **Capture page**: one mobile form (amount, vendor, date, property, receipt photo, a few answers) that logs the
+  entry and shows the verdict, plus a read-only recent-entries page with the chain status. Stdlib only.
+  Binds `127.0.0.1` unless `--lan`; each start prints a pairing link (cookie), POSTs need a CSRF token,
+  uploads are capped (`--max-mb`, default 20), and there are no edit or delete routes. `--lan` is plain HTTP:
+  use it on trusted Wi-Fi or Tailscale (`tailscale serve` for HTTPS).
+
 Tests: `python3 -m unittest discover -s tests`. Install as a command: `pipx install .`

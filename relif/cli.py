@@ -162,6 +162,26 @@ def cmd_retention(args, out):
           f"{kept} must be kept. RELIF never deletes automatically. Not tax advice.", file=out)
 
 
+def cmd_serve(args, out):
+    from .web import lan_address, make_server
+    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    server = make_server(_home(args), host=host, port=args.port, max_bytes=args.max_mb * 1024 * 1024)
+    shown = lan_address() if args.lan else "127.0.0.1"
+    print(f"RELIF capture page on http://{shown}:{server.server_address[1]}/", file=out)
+    print(f"Pair a device (keep this link private): http://{shown}:{server.server_address[1]}/pair?t={server.token}",
+          file=out)
+    if args.lan:
+        print("Listening on your local network over plain HTTP: use it on trusted Wi-Fi or Tailscale only.",
+              file=out)
+    print("Ctrl-C to stop.", file=out, flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
 def _result(res, out):
     print(("SKIPPED: " if res.skipped else "") + res.message, file=out)
     return 0 if res.ok else 1
@@ -262,6 +282,12 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("retention", help="list entries past their CRA retention date")
     r.add_argument("--today", help="pretend today is YYYY-MM-DD")
     r.set_defaults(func=cmd_retention)
+
+    sv = sub.add_parser("serve", help="local phone capture page (localhost unless --lan)")
+    sv.add_argument("--lan", action="store_true", help="listen on the local network (home Wi-Fi / Tailscale)")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--max-mb", type=int, default=20, help="upload size limit in MB")
+    sv.set_defaults(func=cmd_serve)
 
     sub.add_parser("backup", help="restic backup of the store (if configured)").set_defaults(func=cmd_backup)
     sub.add_parser("restore-test", help="restore the latest backup to a temp dir and verify it") \
