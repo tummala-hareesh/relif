@@ -25,6 +25,7 @@ python3 -m relif void 2 --reason "typo, re-entered as #3"  # corrections never e
 python3 -m relif verify                                  # re-walk the hash chain, re-hash receipts
 python3 -m relif export --year 2026                      # ~/.relif/exports/2026/ audit bundle
 python3 -m relif retention                               # what is past its retain-until date
+python3 -m relif rebuild                                 # restore derived tables from the event log
 python3 -m relif backup && python3 -m relif restore-test # via restic, if configured
 ```
 

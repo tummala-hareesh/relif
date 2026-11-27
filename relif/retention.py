@@ -42,10 +42,11 @@ def retention(tax_year: int, *, filed_late_on: Optional[date] = None, on_hold: b
             return Retention(None, True, "Records about capital property not yet disposed of: keep indefinitely.")
         until = date(disposed_on.year + YEARS, 12, 31)
         return Retention(until, False,
-                         f"Records about capital property disposed {disposed_on.isoformat()}: 6 years after the end of that tax year.")
+                         f"Records about capital property disposed {disposed_on.isoformat()}: "
+                         f"{YEARS} years after the end of that tax year.")
     default = date(tax_year + YEARS, 12, 31)
     if filed_late_on is not None:
         late = _add_years(filed_late_on, YEARS)
         if late > default:
-            return Retention(late, False, f"Return filed late on {filed_late_on.isoformat()}: 6 years from filing.")
-    return Retention(default, False, f"6 years from the end of the tax year ({tax_year}).")
+            return Retention(late, False, f"Return filed late on {filed_late_on.isoformat()}: {YEARS} years from filing.")
+    return Retention(default, False, f"{YEARS} years from the end of the tax year ({tax_year}).")

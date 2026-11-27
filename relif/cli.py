@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -97,6 +98,12 @@ def cmd_verify(args, out):
     return 1
 
 
+def cmd_rebuild(args, out):
+    with _open(args) as s:
+        s.rebuild()
+    print("derived tables rebuilt from the event log (history unchanged); run `relif verify`", file=out)
+
+
 def cmd_export(args, out):
     with _open(args) as s:
         path = export_year(s, args.year, force=args.force)
@@ -189,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("verify", help="re-walk the hash chain and re-hash every receipt").set_defaults(func=cmd_verify)
 
+    sub.add_parser("rebuild", help="rebuild entries/receipts tables from the event log") \
+        .set_defaults(func=cmd_rebuild)
+
     e = sub.add_parser("export", help="write the yearly audit bundle")
     e.add_argument("--year", type=int, required=True)
     e.add_argument("--force", action="store_true", help="replace an existing bundle")
@@ -211,6 +221,9 @@ def main(argv=None, out=None) -> int:
         return args.func(args, out) or 0
     except RelifError as exc:
         print(f"relif: {exc}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, OSError) as exc:
+        print(f"relif: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
 
