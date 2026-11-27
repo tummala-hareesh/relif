@@ -1,4 +1,5 @@
 import io
+import os
 import shutil
 import tempfile
 import unittest
@@ -60,3 +61,21 @@ class CliTest(unittest.TestCase):
         code, out = self.run_cli("verify")
         self.assertEqual(code, 1)
         self.assertIn("receipt missing", out)
+
+    def test_property_attach_rebuild_backup(self):
+        receipt = self.tmp / "r.pdf"
+        receipt.write_bytes(b"receipt")
+        self.run_cli("init")
+        self.run_cli("property", "add", "Unit A", "--acquired-on", "2019-01-01")
+        self.assertEqual(self.run_cli("property", "dispose", "1", "--on", "2030-05-01")[0], 0)
+        self.assertIn("disposed 2030-05-01", self.run_cli("property", "list")[1])
+        self.run_cli("add", "1", "A")
+        self.assertEqual(self.run_cli("attach", "1", str(receipt))[0], 0)
+        self.assertEqual(self.run_cli("rebuild")[0], 0)
+        self.assertEqual(self.run_cli("verify")[0], 0)
+        os.environ.pop("RESTIC_REPOSITORY", None)
+        code, out = self.run_cli("backup")
+        self.assertEqual(code, 0)
+        self.assertIn("SKIPPED", out)
+        code, out = self.run_cli("add", "Infinity", "X")
+        self.assertEqual(code, 2)
