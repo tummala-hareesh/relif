@@ -9,7 +9,7 @@ services:
       args:
         UID: ${RELIF_UID:-1000}
         GID: ${RELIF_GID:-1000}
-    image: relif:local
+    image: ${RELIF_IMAGE:-relif:local}   # relif.yaml deploy.backend_image → pulls CI's GHCR image instead of building
     restart: unless-stopped
     environment:
       RELIF_PUBLIC_URL: ${RELIF_PUBLIC_URL:-}
