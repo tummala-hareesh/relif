@@ -212,3 +212,7 @@ def main(argv=None, out=None) -> int:
     except RelifError as exc:
         print(f"relif: {exc}", file=sys.stderr)
         return 2
+
+
+def main_exit() -> None:
+    sys.exit(main())
