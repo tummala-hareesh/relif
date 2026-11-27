@@ -65,6 +65,16 @@ class HealthTest(ServerCase):
             resp, _ = self.request("GET", path)
             self.assertIsNone(resp.getheader("Access-Control-Allow-Origin"), path)
 
+    def test_preflight_only_for_health(self):
+        resp, _ = self.request("OPTIONS", "/health", {"Origin": PAGES_ORIGIN,
+                                                      "Access-Control-Request-Private-Network": "true"})
+        self.assertEqual(resp.status, 204)
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), PAGES_ORIGIN)
+        self.assertEqual(resp.getheader("Access-Control-Allow-Private-Network"), "true")
+        resp, _ = self.request("OPTIONS", "/add")
+        self.assertEqual(resp.status, 405)
+        self.assertIsNone(resp.getheader("Access-Control-Allow-Origin"))
+
     def test_health_is_get_only(self):
         resp, _ = self.request("POST", "/health", {"Content-Length": "0"})
         self.assertEqual(resp.status, 401)
@@ -110,10 +120,25 @@ class PublicUrlTest(ServerCase):
         self.assertEqual(conn.getresponse().status, 421)
 
 
+class Ipv6Test(unittest.TestCase):
+    def test_ipv6_bind_and_public_url(self):
+        tmp = Path(tempfile.mkdtemp(prefix="relif-v6-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        Store.init(tmp / "home").close()
+        try:
+            server = make_server(tmp / "home", host="::1", port=0, token=TOKEN, quiet=True,
+                                 public_url="https://[fd7a::1]")
+        except OSError as exc:
+            self.skipTest(f"no IPv6 loopback: {exc}")
+        self.addCleanup(server.server_close)
+        self.assertIn("[fd7a::1]", server.allowed_hosts)
+
+
 class ValidateTest(unittest.TestCase):
     def test_accepts_https_origin(self):
         self.assertEqual(validate_public_url("https://relif.tail1234.ts.net/"), "https://relif.tail1234.ts.net")
         self.assertEqual(validate_public_url("https://Home.Example:8443"), "https://home.example:8443")
+        self.assertEqual(validate_public_url("https://[FD7A::1]"), "https://[fd7a::1]")
 
     def test_rejects_anything_else(self):
         for bad in ("http://relif.ts.net", "relif.ts.net", "https://", "https://a.ts.net/path",
@@ -166,6 +191,7 @@ class CliTest(unittest.TestCase):
         code, out, kw = self.serve("--host", "0.0.0.0")
         self.assertEqual((code, kw["host"]), (0, "0.0.0.0"))
         self.assertIn("http://192.168.1.5:8765/pair?t=", out)
+        self.assertIn("http://127.0.0.1:8765/pair?t=", out)   # what Docker actually publishes
 
     def test_lan_still_works(self):
         self.assertEqual(self.serve("--lan")[2]["host"], "0.0.0.0")

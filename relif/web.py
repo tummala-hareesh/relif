@@ -72,7 +72,9 @@ def validate_public_url(url: str) -> str:
     if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment \
             or "#" in url or "?" in url:
         raise ValueError("--public-url must be just scheme and host (no path, query, login or fragment)")
-    return f"https://{parts.hostname.lower()}" + (f":{port}" if port and port != 443 else "")
+    host = parts.hostname.lower()
+    host = f"[{host}]" if ":" in host else host
+    return f"https://{host}" + (f":{port}" if port and port != 443 else "")
 
 
 def pages_bookmark(public_url: str) -> str:
@@ -251,6 +253,15 @@ class CaptureHandler(BaseHTTPRequestHandler):
         except (sqlite3.Error, OSError) as exc:
             self.fail(500, f"store error: {type(exc).__name__}")
 
+    def do_OPTIONS(self):  # CORS / Local Network Access preflight, for /health only
+        if not self.host_ok():
+            return self.fail(421, "Wrong address for this RELIF server.", close=True)
+        if urlsplit(self.path).path != "/health":
+            return self.fail(405, "Not allowed.", close=True)
+        self.send(204, headers={"Access-Control-Allow-Origin": PAGES_ORIGIN, "Access-Control-Allow-Methods": "GET",
+                                "Access-Control-Allow-Private-Network": "true", "Access-Control-Max-Age": "600",
+                                "Vary": "Origin"})
+
     def do_PUT(self):
         self.fail(405, "Entries cannot be changed. Void and re-add with the CLI.", close=True)
 
@@ -361,7 +372,9 @@ class CaptureServer(ThreadingHTTPServer):
     def __init__(self, home, address, token: str, max_bytes: int, quiet: bool = False, public_url: str = None):
         self.home = Path(home)
         self.public_url = validate_public_url(public_url) if public_url else None
-        self.allowed_hosts = ({urlsplit(self.public_url).hostname} | _LOCAL_HOSTS) if self.public_url else set()
+        self.allowed_hosts = ({_host_name(urlsplit(self.public_url).netloc)} | _LOCAL_HOSTS) if self.public_url else set()
+        if ":" in address[0]:
+            self.address_family = socket.AF_INET6
         self.quiet = quiet
         self.token = token
         self.max_bytes = max_bytes
