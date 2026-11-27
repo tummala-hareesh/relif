@@ -16,17 +16,17 @@ A local-first, tamper-evident ledger for rental expenses and receipts that keeps
 6-year window. Python stdlib only. Not tax advice; RELIF never files anything with the CRA.
 
 ```bash
-python3 -m relif init                                   # creates ~/.relif (or --home / $RELIF_HOME)
-python3 -m relif property add "Unit A" --rented-pct 60
-python3 -m relif add 42.10 "Hardware Co" --date 2026-03-04 --property 1 \
+relif init                                   # creates ~/.relif (or --home / $RELIF_HOME)
+relif property add "Unit A" --rented-pct 60
+relif add 42.10 "Hardware Co" --date 2026-03-04 --property 1 \
     --category "Repairs and maintenance (8960)" -r ~/scans/caulk.pdf
-python3 -m relif list --year 2026
-python3 -m relif void 2 --reason "typo, re-entered as #3"  # corrections never edit in place
-python3 -m relif verify                                  # re-walk the hash chain, re-hash receipts
-python3 -m relif export --year 2026                      # ~/.relif/exports/2026/ audit bundle
-python3 -m relif retention                               # what is past its retain-until date
-python3 -m relif rebuild                                 # restore derived tables from the event log
-python3 -m relif backup && python3 -m relif restore-test # via restic, if configured
+relif list --year 2026
+relif void 2 --reason "typo, re-entered as #3"  # corrections never edit in place
+relif verify                                  # re-walk the hash chain, re-hash receipts
+relif export --year 2026                      # ~/.relif/exports/2026/ audit bundle
+relif retention                               # what is past its retain-until date
+relif rebuild                                 # restore derived tables from the event log
+relif backup && relif restore-test # via restic, if configured
 ```
 
 - **Ledger:** every change is an append-only, hash-chained event in SQLite; `verify` catches edited or
@@ -42,14 +42,14 @@ python3 -m relif backup && python3 -m relif restore-test # via restic, if config
 ## Ask and capture (v0.2)
 
 ```bash
-python3 -m relif ask --kind repair --work restores               # cited verdict only
-python3 -m relif ask --kind utilities --use shared --property 1 \
+relif ask --kind repair --work restores               # cited verdict only
+relif ask --kind utilities --use shared --property 1 \
     --amount 120 --vendor Hydro -r ~/scans/hydro.pdf               # verdict + ledger entry
-python3 -m relif serve                                            # phone capture page on localhost
-python3 -m relif serve --lan                                      # home Wi-Fi / Tailscale (opt-in)
+relif serve                                            # phone capture page on localhost
+relif serve --lan                                      # home Wi-Fi / Tailscale (opt-in)
 ```
 
-- **Verdicts** (`relif/verdict.py`): a pure decision tree over the 8 questions (use, availability, kind,
+- **Verdicts** (`backend/relif/verdict.py`): a pure decision tree over the 8 questions (use, availability, kind,
   interest vs principal, current vs capital, personal share, short-term rental compliance, profit). Outcomes:
   current (T776 line), capital (CCA class), partial (rental %), not deductible, unsure (ask an accountant).
   Every verdict cites CRA T4036 and lists its assumptions. Not tax advice.
@@ -60,65 +60,86 @@ python3 -m relif serve --lan                                      # home Wi-Fi /
   uploads are capped (`--max-mb`, default 20), and there are no edit or delete routes. `--lan` is plain HTTP:
   use it on trusted Wi-Fi or Tailscale (`tailscale serve` for HTTPS).
 
-Tests: `python3 -m unittest discover -s tests`. Install as a command: `pipx install .`
+## Layout, config and deploying
 
-## Run it at home (Docker)
+```
+relif.yaml        one config: backend / frontend / deploy (`relif config` shows what is in effect)
+backend/          the `relif` package (ledger, verdicts, CLI, capture server), Dockerfile, compose files
+frontend/         app.py (the stlite page) + build.py (stdlib: writes frontend/site/)
+tests/            python3 -m unittest discover -s tests -t .
+vercel.json       Vercel builds frontend/ on every push
+```
 
-The capture server needs a machine (GitHub Pages only serves static files), so it runs on your laptop in
-Docker, restarts on its own and keeps the store in a normal host folder: `relif verify`, `export` and
-`backup` keep working from the host CLI.
+Install the CLI: `pipx install ./backend` (needs PyYAML, installed with it). Then, from the repo folder:
 
 ```bash
-cp .env.example .env                       # set RELIF_UID/RELIF_GID to `id -u` / `id -g`
+relif config                    # effective settings and where each comes from (flag > env > relif.yaml > default)
+relif deploy backend            # per deploy.backend: docker | docker+tailscale | local (`relif serve`)
+relif deploy frontend           # builds frontend/site/ locally; Vercel does the same on push
+relif deploy backend --dry-run  # print the command instead
+```
+
+```yaml
+backend:  { home: ~/.relif, bind: 127.0.0.1:8765, public_url: "", max_upload_mb: 20 }
+frontend: { url: https://relif.vercel.app }        # its origin is the only one allowed to read /health
+deploy:   { frontend: vercel, backend: docker }
+```
+
+The **backend** (ledger, receipts, capture server) always runs on your own machine. The **frontend** is a static
+page with no ledger in it; it is the only part that is hosted.
+
+## Run the backend at home (Docker)
+
+The capture server needs a machine (Vercel only serves the static frontend), so it runs on your laptop in
+Docker, restarts on its own and keeps the store in a normal host folder: `relif verify`, `export` and
+`backup` keep working from the host CLI. `relif.yaml` is mounted read-only into the container.
+
+```bash
+cp backend/.env.example backend/.env       # set RELIF_UID/RELIF_GID to `id -u` / `id -g`
 mkdir -p ~/.relif                          # create it yourself, or Docker makes it root-owned
-docker compose run --rm relif init         # once, if ~/.relif has no store yet
-docker compose up -d --build               # http://127.0.0.1:8765 on this laptop only
+docker compose -f backend/compose.yaml run --rm relif init   # once, if ~/.relif has no store yet
+relif deploy backend                       # http://127.0.0.1:8765 on this laptop only
 xdg-open "http://127.0.0.1:8765/pair?t=$(cat ~/.relif/serve.token)"   # pair this browser
 ```
 
-**Phone, from anywhere (Tailscale, recommended).** The sidecar makes the server its own tailnet node `relif`
-with a real HTTPS certificate. Only devices on your tailnet can reach it (`serve`, never `funnel`), and no host
-port is published. Put a tagged, non-reusable, pre-approved `TS_AUTHKEY` and
-`RELIF_PUBLIC_URL=https://relif.<your-tailnet>.ts.net` in `.env` (never commit it), then:
+**Phone, from anywhere (Tailscale, recommended).** Set `deploy.backend: docker+tailscale`. The sidecar makes the
+server its own tailnet node `relif` with a real HTTPS certificate. Only devices on your tailnet can reach it
+(`serve`, never `funnel`), and no host port is published. Put a tagged, non-reusable, pre-approved `TS_AUTHKEY`
+and `RELIF_PUBLIC_URL=https://relif.<your-tailnet>.ts.net` in `backend/.env` (never commit it; this repo is
+public), then `relif deploy backend` and read the pairing link and phone bookmark with
+`docker compose -f backend/compose.yaml -f backend/compose.tailscale.yaml logs relif`.
 
-```bash
-docker compose -f compose.yaml -f compose.tailscale.yaml up -d --build
-docker compose -f compose.yaml -f compose.tailscale.yaml logs relif   # pairing link + phone bookmark
-```
+With a public URL the pairing link is HTTPS, the cookie is `Secure`, and any other `Host` header gets `421`
+(this also blocks DNS rebinding). `GET /health` is the one route that needs no pairing: it returns only
+`{"ok": true, "version": ...}`, and only the `frontend.url` origin may read it.
 
-With `--public-url` (here `RELIF_PUBLIC_URL`) the pairing link is HTTPS, the cookie is `Secure`, and any
-other `Host` header gets `421` (this also blocks DNS rebinding). `GET /health` is the one route that needs
-no pairing: it returns only `{"ok": true, "version": ...}`, and only the Pages demo origin may read it.
-
-**Open it from the demo page.** `relif serve` prints a bookmark like
-`https://tummala-hareesh.github.io/relif-demo/#server=https://relif.<your-tailnet>.ts.net`. The address
-rides in the URL fragment, which browsers never send to GitHub, so it is not in the public page or its logs.
-The page then shows 🟢 *Open my RELIF* or 😴 *laptop asleep or off your tailnet* within 3 seconds. Only
-`https://*.ts.net` addresses are accepted, so a crafted link can't turn the page into a redirect.
+**Open it from the frontend.** `relif serve` prints a bookmark like
+`https://relif.vercel.app/#server=https://relif.<your-tailnet>.ts.net`. The address rides in the URL fragment,
+which browsers never send to the host, so it is not in the public page or its logs. The page then shows
+🟢 *Open my RELIF* or 😴 *laptop asleep or off your tailnet* within 3 seconds. Only `https://*.ts.net` addresses
+are accepted, so a crafted link can't turn the page into a redirect.
 
 **Keep the laptop awake.** `restart: unless-stopped` brings the server back after a reboot, but a sleeping
 laptop can't answer. Disable suspend on AC power (or keep the lid open) when you want to log from your phone.
 
-## Try the verdict in a browser (demo page)
+## The frontend: try the verdict in a browser
 
 The "is this deductible?" questions also run as a static page: Streamlit in the browser via
-[stlite](https://github.com/whitphx/stlite) (Python on WebAssembly), so it can be served from GitHub Pages
-with no server. Only the pure decision tree ships (`relif/verdict.py` + `relif/demo.py` + `demo/app.py`):
-no ledger, no uploads, no browser storage; answers never leave the page. Real entries still go through
-`relif ask`/`relif add` or the local `relif serve` capture page, so tax records stay on your machine.
+[stlite](https://github.com/whitphx/stlite) (Python on WebAssembly), so it needs no server. Only the pure
+decision tree ships (`backend/relif/verdict.py` + `backend/relif/demo.py` + `frontend/app.py`): no ledger, no
+uploads, no browser storage; answers never leave the page. Real entries still go through `relif ask`/`relif add`
+or the home capture page, so tax records stay on your machine.
 
 ```bash
-python3 -m relif.demo build --out site        # writes site/index.html (stlite pinned in relif/demo.py)
-python3 -m http.server -d site 8000           # open http://localhost:8000 (first load fetches Python, ~tens of MB)
+python3 frontend/build.py                       # writes frontend/site/index.html (stlite pinned in build.py)
+python3 -m http.server -d frontend/site 8000    # open http://localhost:8000 (first load fetches Python)
 ```
 
 A golden test runs every row of the verdict table through both `relif ask` and the page adapter and
 requires identical text.
 
-Demo URL (live after the first `demo-v*` deploy): <https://tummala-hareesh.github.io/relif-demo/>. Public; not tax advice.
-
-Deploy: pushing a `demo-v*` tag runs `.github/workflows/demo-pages.yml`, which runs the tests, builds the site
-and pushes only `site/` (no history) to the `gh-pages` branch of the public `tummala-hareesh/relif-demo` repo.
-This repo stays private. One-time setup: create `relif-demo`, add an ed25519 deploy key with write access there,
-store its private key as the Actions secret `DEMO_DEPLOY_KEY` in this repo, and enable Pages on `relif-demo`
-(deploy from branch `gh-pages`, root). A failing test blocks the deploy.
+**Deploy (Vercel).** Import this repo in Vercel once (framework "Other"; `vercel.json` sets the build command
+and output folder). Every push to `main` then deploys production and every PR gets a preview URL. Put the
+production URL in `relif.yaml` → `frontend.url` and restart the backend so `/health` and the bookmark match.
+Tests run in GitHub Actions (`test.yml`); make that check required on `main` if a red test should block a
+deploy. Public; not tax advice.
