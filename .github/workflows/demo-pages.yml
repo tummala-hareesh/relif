@@ -1,8 +1,10 @@
-# Builds the static "try the verdict" demo (stlite) and deploys it to GitHub Pages.
+# Builds the static "try the verdict" demo (stlite) and publishes it to the public tummala-hareesh/relif-demo
+# repo, whose GitHub Pages serves https://tummala-hareesh.github.io/relif-demo/ from its gh-pages branch.
+# This repo stays private: only the built site (index.html + .nojekyll) leaves it, and that page already embeds
+# relif/verdict.py, relif/demo.py and demo/app.py. Nothing from the ledger ships.
 # Runs only on a demo tag (e.g. `git tag demo-v0.1.0 && git push origin demo-v0.1.0`) or by hand.
-# Nothing from the ledger ships: only relif/verdict.py, relif/demo.py and demo/app.py.
-# Pages must be enabled (Settings > Pages > Source: GitHub Actions); on a private repo that needs a paid plan,
-# and the site is public either way.
+# One-time setup: an ed25519 deploy key with write access on relif-demo; its private half is the Actions secret
+# DEMO_DEPLOY_KEY here. Pages on relif-demo: Source = deploy from branch gh-pages / (root).
 name: demo-pages
 
 on:
@@ -12,15 +14,13 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: demo-pages
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,16 +31,12 @@ jobs:
         run: python3 -m unittest discover -s tests
       - name: Build site
         run: python3 -m relif.demo build --out site
-      - uses: actions/upload-pages-artifact@v3
+      - name: Publish site to relif-demo (gh-pages)
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:
-          path: site
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          deploy_key: ${{ secrets.DEMO_DEPLOY_KEY }}
+          external_repository: tummala-hareesh/relif-demo
+          publish_branch: gh-pages
+          publish_dir: ./site
+          force_orphan: true
+          commit_message: "Deploy demo from ${{ github.ref_name }}"
