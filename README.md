@@ -61,3 +61,20 @@ python3 -m relif serve --lan                                      # home Wi-Fi /
   use it on trusted Wi-Fi or Tailscale (`tailscale serve` for HTTPS).
 
 Tests: `python3 -m unittest discover -s tests`. Install as a command: `pipx install .`
+
+## Try the verdict in a browser (demo page)
+
+The "is this deductible?" questions also run as a static page: Streamlit in the browser via
+[stlite](https://github.com/whitphx/stlite) (Python on WebAssembly), so it can be served from GitHub Pages
+with no server. Only the pure decision tree ships (`relif/verdict.py` + `relif/demo.py` + `demo/app.py`):
+no ledger, no uploads, no browser storage; answers never leave the page. Real entries still go through
+`relif ask`/`relif add` or the local `relif serve` capture page, so tax records stay on your machine.
+
+```bash
+python3 -m relif.demo build --out site        # writes site/index.html (stlite pinned in relif/demo.py)
+python3 -m http.server -d site 8000           # open http://localhost:8000 (first load fetches Python, ~tens of MB)
+```
+
+A golden test runs every row of the verdict table through both `relif ask` and the page adapter and
+requires identical text. Deploy: enable Pages (Source: GitHub Actions), then push a `demo-v*` tag
+(`.github/workflows/demo-pages.yml`). The site is public. Not tax advice.
