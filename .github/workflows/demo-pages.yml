@@ -1,0 +1,46 @@
+# Builds the static "try the verdict" demo (stlite) and deploys it to GitHub Pages.
+# Runs only on a demo tag (e.g. `git tag demo-v0.1.0 && git push origin demo-v0.1.0`) or by hand.
+# Nothing from the ledger ships: only relif/verdict.py, relif/demo.py and demo/app.py.
+# Pages must be enabled (Settings > Pages > Source: GitHub Actions); on a private repo that needs a paid plan,
+# and the site is public either way.
+name: demo-pages
+
+on:
+  push:
+    tags: ["demo-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests (golden CLI/page table included)
+        run: python3 -m unittest discover -s tests
+      - name: Build site
+        run: python3 -m relif.demo build --out site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

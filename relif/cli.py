@@ -14,7 +14,7 @@ from .capture import answers_for, log_expense
 from .export import export_year
 from .money import format_cents, parse_cents
 from .store import RelifError, Store, entry_retention
-from .verdict import KINDS, LOAN_PARTS, TRI, USES, WORK, decide
+from .verdict import KINDS, LOAN_PARTS, TRI, USES, WORK, decide, verdict_lines
 
 
 def _home(args) -> Path:
@@ -62,12 +62,8 @@ def cmd_add(args, out):
 
 
 def print_verdict(v, out):
-    print(v.label, file=out)
-    print(f"  why: {v.reason}", file=out)
-    for note in v.assumptions:
-        print(f"  {note}", file=out)
-    print(f"  source: {v.citation}", file=out)
-    print(f"  {v.disclaimer}", file=out)
+    for line in verdict_lines(v):
+        print(line, file=out)
 
 
 def cmd_ask(args, out):
