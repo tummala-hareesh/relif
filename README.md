@@ -55,7 +55,8 @@ python3 -m relif serve --lan                                      # home Wi-Fi /
   Every verdict cites CRA T4036 and lists its assumptions. Not tax advice.
 - **Capture page**: one mobile form (amount, vendor, date, property, receipt photo, a few answers) that logs the
   entry and shows the verdict, plus a read-only recent-entries page with the chain status. Stdlib only.
-  Binds `127.0.0.1` unless `--lan`; each start prints a pairing link (cookie), POSTs need a CSRF token,
+  Binds `127.0.0.1` unless `--lan`; it prints a pairing link (cookie; the token is kept in `serve.token`,
+  mode 0600, so phones stay paired across restarts; `--new-token` unpairs every device), POSTs need a CSRF token,
   uploads are capped (`--max-mb`, default 20), and there are no edit or delete routes. `--lan` is plain HTTP:
   use it on trusted Wi-Fi or Tailscale (`tailscale serve` for HTTPS).
 

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import hmac
 import html
+import os
 import secrets
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -16,7 +18,6 @@ from datetime import date
 from email import policy
 from email.parser import BytesParser
 from hashlib import sha256
-from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +29,8 @@ from .store import RelifError, Store
 from .verdict import KINDS, LOAN_PARTS, TRI, USES, WORK, decide
 
 COOKIE = "relif_session"
+TOKEN_FILE = "serve.token"
+REQUEST_TIMEOUT = 30  # seconds per socket read: a stalled client can't hold a thread forever
 DEFAULT_PORT = 8765
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 _SAFE_NAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -98,6 +101,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
     server_version = "relif"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    timeout = REQUEST_TIMEOUT
 
     # ---- plumbing ------------------------------------------------------------------------
     def log_message(self, fmt, *args):  # never log the pairing token in the query string
@@ -174,7 +178,14 @@ class CaptureHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
             mb = self.server.max_bytes / (1024 * 1024)
             return self.fail(413, f"Upload too large (limit {mb:g} MB).", close=True)
-        body = self.rfile.read(length)
+        try:
+            body = self.rfile.read(length)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            return
+        if len(body) < length:
+            self.close_connection = True
+            return
         try:
             fields, files = parse_multipart(ctype, body)
         except (ValueError, IndexError, TypeError):
@@ -303,15 +314,32 @@ class CaptureServer(ThreadingHTTPServer):
         super().__init__(address, CaptureHandler)
 
 
+def pairing_token(home, *, rotate: bool = False) -> str:
+    """The pairing token, kept in the store folder (mode 0600) so paired phones survive a restart."""
+    path = Path(home).expanduser() / TOKEN_FILE
+    if not rotate:
+        try:
+            token = path.read_text(encoding="ascii").strip()
+            if len(token) >= 32:
+                return token
+        except (OSError, UnicodeDecodeError):
+            pass
+    token = secrets.token_urlsafe(32)
+    fd = os.open(path.with_name(TOKEN_FILE + ".tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(token + "\n")
+    os.replace(path.with_name(TOKEN_FILE + ".tmp"), path)
+    return token
+
+
 def make_server(home, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT, token: str = None,
                 max_bytes: int = DEFAULT_MAX_BYTES, quiet: bool = False) -> CaptureServer:
     Store(home).close()  # fail fast if there is no store
-    return CaptureServer(home, (host, port), token or secrets.token_urlsafe(24), max_bytes, quiet)
+    return CaptureServer(home, (host, port), token or pairing_token(home), max_bytes, quiet)
 
 
 def lan_address() -> str:
     """Best guess at this machine's LAN address (no packets are sent)."""
-    import socket
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         try:
             sock.connect(("10.255.255.255", 1))

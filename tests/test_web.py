@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from relif.store import Store
-from relif.web import csrf_token, make_server
+from relif.web import csrf_token, make_server, pairing_token
 
 TOKEN = "pairing-token-for-tests"
 
@@ -57,6 +57,32 @@ class WebTest(unittest.TestCase):
     def entries(self):
         with Store(self.home) as s:
             return s.entries(), s
+
+    def test_pairing_token_persists_until_rotated(self):
+        first = pairing_token(self.home)
+        self.assertGreaterEqual(len(first), 32)
+        self.assertEqual(pairing_token(self.home), first)
+        self.assertEqual((self.home / "serve.token").stat().st_mode & 0o777, 0o600)
+        self.assertNotEqual(pairing_token(self.home, rotate=True), first)
+        with Store(self.home) as s:
+            self.assertTrue(s.verify().ok)
+
+    def test_truncated_body_logs_nothing(self):
+        body, ctype = multipart({"csrf": csrf_token(TOKEN), "amount": "1", "vendor": "X"})
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        self.addCleanup(conn.close)
+        conn.putrequest("POST", "/add")
+        conn.putheader("Cookie", self.cookie)
+        conn.putheader("Content-Type", ctype)
+        conn.putheader("Content-Length", str(len(body) + 100))
+        conn.endheaders()
+        conn.send(body)
+        conn.sock.shutdown(1)  # half-close: server sees EOF before Content-Length bytes
+        try:
+            conn.getresponse().read()
+        except (http.client.HTTPException, OSError):
+            pass
+        self.assertEqual(len(self.entries()[0]), 0)
 
     def test_default_bind_is_localhost(self):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")

@@ -163,9 +163,14 @@ def cmd_retention(args, out):
 
 
 def cmd_serve(args, out):
-    from .web import lan_address, make_server
+    from .web import lan_address, make_server, pairing_token
+    if args.max_mb < 1:
+        raise RelifError("--max-mb must be at least 1")
     host = "0.0.0.0" if args.lan else "127.0.0.1"
-    server = make_server(_home(args), host=host, port=args.port, max_bytes=args.max_mb * 1024 * 1024)
+    with _open(args):  # fail fast before touching the store folder
+        pass
+    token = pairing_token(_home(args), rotate=args.new_token)
+    server = make_server(_home(args), host=host, port=args.port, token=token, max_bytes=args.max_mb * 1024 * 1024)
     shown = lan_address() if args.lan else "127.0.0.1"
     print(f"RELIF capture page on http://{shown}:{server.server_address[1]}/", file=out)
     print(f"Pair a device (keep this link private): http://{shown}:{server.server_address[1]}/pair?t={server.token}",
@@ -287,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--lan", action="store_true", help="listen on the local network (home Wi-Fi / Tailscale)")
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--max-mb", type=int, default=20, help="upload size limit in MB")
+    sv.add_argument("--new-token", action="store_true", help="rotate the pairing token (unpairs every device)")
     sv.set_defaults(func=cmd_serve)
 
     sub.add_parser("backup", help="restic backup of the store (if configured)").set_defaults(func=cmd_backup)
