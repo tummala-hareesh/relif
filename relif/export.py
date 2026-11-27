@@ -38,7 +38,7 @@ def _cell(value) -> str:
 
 LEDGER_COLUMNS = ["entry_id", "date", "tax_year", "property", "vendor", "description", "amount",
                   "category", "verdict", "is_capital", "cca_class", "voided", "void_reason",
-                  "retain_until", "retention_rule", "receipts"]
+                  "retain_until", "retention_rule", "receipts", "deductible_pct"]
 
 
 def _slug(text: str, limit: int = 30) -> str:
@@ -89,19 +89,25 @@ def export_year(store: Store, year: int, *, force: bool = False, allow_unverifie
                         _cell(e["description"]), format_cents(e["amount_cents"]), _cell(e["category"]),
                         _cell(e["verdict"]), "yes" if e["is_capital"] else "no", _cell(e["cca_class"]),
                         "yes" if e["voided"] else "no", _cell(e["void_reason"]),
-                        e["retain_until"] or NO_END_DATE, e["retention_rule"] or "", " ".join(names)])
+                        e["retain_until"] or NO_END_DATE, e["retention_rule"] or "", " ".join(names),
+                        "" if e["deductible_pct"] is None else e["deductible_pct"]])
 
-    totals = {}
+    totals = {}  # (property, category) -> [deductible share, receipts total]; no share recorded = full amount
     for e in entries:
-        if e["voided"] or e["is_capital"]:
+        pct = e["deductible_pct"]
+        if e["voided"] or e["is_capital"] or pct == 0:
             continue
+        cents = e["amount_cents"]
+        share = cents if pct is None else (cents * pct + 50) // 100
         key = (props.get(e["property_id"], ""), e["category"] or "uncategorised")
-        totals[key] = totals.get(key, 0) + e["amount_cents"]
+        t = totals.setdefault(key, [0, 0])
+        t[0] += share
+        t[1] += cents
     with open(tmp / "t776_summary.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["property", "category", "total"])
-        for (prop, cat), cents in sorted(totals.items()):
-            w.writerow([_cell(prop), _cell(cat), format_cents(cents)])
+        w.writerow(["property", "category", "total", "receipts_total"])
+        for (prop, cat), (share, full) in sorted(totals.items()):
+            w.writerow([_cell(prop), _cell(cat), format_cents(share), format_cents(full)])
 
     capital = [e for e in store.entries(include_voided=False) if e["is_capital"] and e["tax_year"] <= year]
     with open(tmp / "capital_register.csv", "w", newline="", encoding="utf-8") as f:
@@ -129,7 +135,7 @@ def export_year(store: Store, year: int, *, force: bool = False, allow_unverifie
         f"total active {format_cents(sum(e['amount_cents'] for e in live))}",
         f"Receipts: {len(used)}",
         "",
-        "Files: ledger.csv (all entries), t776_summary.csv (current expenses by property and category),",
+        "Files: ledger.csv (all entries), t776_summary.csv (deductible share of current expenses by property and category),",
         "capital_register.csv (capital items), receipts/ (copies of receipts), anchors.log.",
         "",
         "Retention: keep this folder until "

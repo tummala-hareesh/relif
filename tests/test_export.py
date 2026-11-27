@@ -35,7 +35,8 @@ class ExportTest(StoreTestCase):
         self.assertEqual(ledger[0]["receipts"], f"2026-03-04_hardware-co_42.10_{self.a}.pdf")
         self.assertTrue((out / "receipts" / ledger[0]["receipts"]).exists())
         self.assertEqual(self.read(out / "t776_summary.csv"),
-                         [{"property": "Unit A", "category": "Repairs (8960)", "total": "141.10"}])
+                         [{"property": "Unit A", "category": "Repairs (8960)", "total": "141.10",
+                           "receipts_total": "141.10"}])
         self.assertEqual([r["vendor"] for r in self.read(out / "capital_register.csv")], ["Roofer"])
         readme = (out / "README.txt").read_text()
         self.assertIn("not tax advice", readme)

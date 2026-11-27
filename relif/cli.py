@@ -10,9 +10,11 @@ from pathlib import Path
 
 from . import __version__
 from .backup import backup, restore_test
+from .capture import answers_for, log_expense
 from .export import export_year
 from .money import format_cents, parse_cents
 from .store import RelifError, Store, entry_retention
+from .verdict import KINDS, LOAN_PARTS, TRI, USES, WORK, decide
 
 
 def _home(args) -> Path:
@@ -57,6 +59,39 @@ def cmd_add(args, out):
         e = s.entry(eid)
         print(f"entry #{eid}  {e['date']}  {e['vendor']}  {format_cents(e['amount_cents'])}"
               f"  keep until {e['retain_until'] or 'no end date'}", file=out)
+
+
+def print_verdict(v, out):
+    print(v.label, file=out)
+    print(f"  why: {v.reason}", file=out)
+    for note in v.assumptions:
+        print(f"  {note}", file=out)
+    print(f"  source: {v.citation}", file=out)
+    print(f"  {v.disclaimer}", file=out)
+
+
+def cmd_ask(args, out):
+    if args.amount is not None and not args.vendor:
+        raise RelifError("--vendor is required with --amount to log the expense")
+    with _open(args) as s:
+        try:
+            v = decide(answers_for(s, args.property, rental_pct=args.rental_pct, kind=args.kind, use=args.use,
+                                   available=args.available, loan_part=args.loan_part, work=args.work,
+                                   personal_pct=args.personal_pct, short_term=args.short_term,
+                                   str_compliant=args.str_compliant, profit=args.profit))
+        except ValueError as exc:
+            raise RelifError(str(exc)) from None
+        print_verdict(v, out)
+        if args.amount is None:
+            return
+        try:
+            cents = parse_cents(args.amount)
+        except ValueError as exc:
+            raise RelifError(str(exc)) from None
+        eid = log_expense(s, v, amount_cents=cents, date=args.date or date.today().isoformat(),
+                          vendor=args.vendor, description=args.description, property_id=args.property,
+                          receipts=args.receipt or [])
+        print(f"entry #{eid} logged  {format_cents(cents)}  {args.vendor}", file=out)
 
 
 def cmd_list(args, out):
@@ -127,6 +162,31 @@ def cmd_retention(args, out):
           f"{kept} must be kept. RELIF never deletes automatically. Not tax advice.", file=out)
 
 
+def cmd_serve(args, out):
+    from .web import lan_address, make_server, pairing_token
+    if args.max_mb < 1:
+        raise RelifError("--max-mb must be at least 1")
+    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    with _open(args):  # fail fast before touching the store folder
+        pass
+    token = pairing_token(_home(args), rotate=args.new_token)
+    server = make_server(_home(args), host=host, port=args.port, token=token, max_bytes=args.max_mb * 1024 * 1024)
+    shown = lan_address() if args.lan else "127.0.0.1"
+    print(f"RELIF capture page on http://{shown}:{server.server_address[1]}/", file=out)
+    print(f"Pair a device (keep this link private): http://{shown}:{server.server_address[1]}/pair?t={server.token}",
+          file=out)
+    if args.lan:
+        print("Listening on your local network over plain HTTP: use it on trusted Wi-Fi or Tailscale only.",
+              file=out)
+    print("Ctrl-C to stop.", file=out, flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
 def _result(res, out):
     print(("SKIPPED: " if res.skipped else "") + res.message, file=out)
     return 0 if res.ok else 1
@@ -177,6 +237,26 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--receipt", "-r", action="append", help="receipt file (repeatable)")
     a.set_defaults(func=cmd_add)
 
+    q = sub.add_parser("ask", help="is this deductible? (add --amount and --vendor to log it too)")
+    q.add_argument("--kind", choices=KINDS, help="what was bought")
+    q.add_argument("--use", choices=USES, default="rental",
+                   help="for a rented unit only, shared with your own unit, or your own unit")
+    q.add_argument("--property", type=int)
+    q.add_argument("--rental-pct", type=int, help="rented share for shared use (default: the property's)")
+    q.add_argument("--available", choices=TRI, default="yes", help="property available for rent then")
+    q.add_argument("--loan-part", choices=LOAN_PARTS, help="for loan payments")
+    q.add_argument("--work", choices=WORK, help="for repairs: restores, improves or is a separate asset")
+    q.add_argument("--personal-pct", type=int, default=0, help="personal share of a mixed purchase")
+    q.add_argument("--short-term", action="store_true", help="short-term rental (under 90 days)")
+    q.add_argument("--str-compliant", choices=TRI, help="short-term rental meets local licensing")
+    q.add_argument("--profit", choices=TRI, default="yes", help="reasonable expectation of profit")
+    q.add_argument("--amount", help="log it: e.g. 42.10")
+    q.add_argument("--vendor")
+    q.add_argument("--date", help="YYYY-MM-DD (default today)")
+    q.add_argument("--description", "-d")
+    q.add_argument("--receipt", "-r", action="append", help="receipt file (repeatable)")
+    q.set_defaults(func=cmd_ask)
+
     l = sub.add_parser("list", help="list entries")
     l.add_argument("--year", type=int)
     l.add_argument("--property", type=int)
@@ -207,6 +287,13 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("retention", help="list entries past their CRA retention date")
     r.add_argument("--today", help="pretend today is YYYY-MM-DD")
     r.set_defaults(func=cmd_retention)
+
+    sv = sub.add_parser("serve", help="local phone capture page (localhost unless --lan)")
+    sv.add_argument("--lan", action="store_true", help="listen on the local network (home Wi-Fi / Tailscale)")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--max-mb", type=int, default=20, help="upload size limit in MB")
+    sv.add_argument("--new-token", action="store_true", help="rotate the pairing token (unpairs every device)")
+    sv.set_defaults(func=cmd_serve)
 
     sub.add_parser("backup", help="restic backup of the store (if configured)").set_defaults(func=cmd_backup)
     sub.add_parser("restore-test", help="restore the latest backup to a temp dir and verify it") \
