@@ -192,5 +192,36 @@ class CliTest(unittest.TestCase):
         self.assertIn("--public-url", text)
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class DockerFilesTest(unittest.TestCase):
+    def test_image_runs_as_non_root_on_data(self):
+        text = (ROOT / "Dockerfile").read_text()
+        self.assertIn("USER relif", text)
+        self.assertIn("RELIF_HOME=/data", text)
+        self.assertIn("/health", text)
+        self.assertNotIn("requirements", text)  # stdlib only
+
+    def test_compose_publishes_on_localhost_only(self):
+        text = (ROOT / "compose.yaml").read_text()
+        self.assertIn('"127.0.0.1:8765:8765"', text)
+        self.assertIn("restart: unless-stopped", text)
+        self.assertIn(":/data", text)
+
+    def test_tailscale_sidecar_is_tailnet_only(self):
+        compose = (ROOT / "compose.tailscale.yaml").read_text()
+        self.assertIn("ports: !reset []", compose)
+        self.assertIn("network_mode: service:tailscale", compose)
+        self.assertNotIn("funnel", compose.lower().replace("not `funnel`", ""))
+        serve = json.loads((ROOT / "tailscale/serve.json").read_text())
+        self.assertEqual(serve["AllowFunnel"], {"${TS_CERT_DOMAIN}:443": False})
+
+    def test_secrets_stay_out_of_git(self):
+        ignored = (ROOT / ".gitignore").read_text().split()
+        self.assertIn(".env", ignored)
+        self.assertRegex((ROOT / ".env.example").read_text(), r"(?m)^TS_AUTHKEY=$")
+
+
 if __name__ == "__main__":
     unittest.main()

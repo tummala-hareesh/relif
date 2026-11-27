@@ -142,7 +142,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
     # ---- plumbing ------------------------------------------------------------------------
     def log_message(self, fmt, *args):  # never log the pairing token in the query string
-        if not self.server.quiet:
+        if not self.server.quiet and urlsplit(self.path).path != "/health":  # healthchecks every 30 s
             sys.stderr.write(f"{self.address_string()} {self.command} {urlsplit(self.path).path}\n")
 
     def send(self, status: int, body: bytes = b"", ctype="text/html; charset=utf-8", headers=None, close=False):

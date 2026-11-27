@@ -1,0 +1,6 @@
+# Only pyproject.toml, README.md and relif/ go into the image.
+*
+!pyproject.toml
+!README.md
+!relif/
+relif/__pycache__/
