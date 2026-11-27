@@ -127,7 +127,7 @@ class TestRepoFile(unittest.TestCase):
         c = config.load(ROOT / "relif.yaml")
         self.assertEqual(c.deploy_frontend, "vercel")
         text = (ROOT / "relif.yaml").read_text()
-        for key in ("home", "bind", "public_url", "max_upload_mb", "url", "frontend", "backend"):
+        for key in ("home", "bind", "public_url", "max_upload_mb", "url", "frontend", "backend", "backend_image"):
             self.assertIn(key + ":", text)
         self.assertNotRegex(text, r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net")   # no real tailnet name in a public repo
 
@@ -202,6 +202,24 @@ class TestDeploy(Tmp):
         self.assertIn("relif", out)
         self.assertIn("serve", out)
         self.assertNotIn("docker", out)
+
+    def test_backend_image_is_pulled_not_built(self):
+        code, out = self.dry("backend", "deploy:\n  backend_image: ghcr.io/me/relif-backend:latest\n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("RELIF_IMAGE=ghcr.io/me/relif-backend:latest", out)
+        self.assertIn("up -d --pull always", out)
+        self.assertNotIn("--build", out)
+
+    def test_no_backend_image_builds_locally(self):
+        code, out = self.dry("backend")
+        self.assertNotIn("RELIF_IMAGE", out)
+        self.assertIn("--build", out)
+
+    def test_bad_backend_image_is_named(self):
+        self.write("deploy:\n  backend_image: 'not an image'\n")
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(self.tmp / "relif.yaml")
+        self.assertIn("deploy.backend_image", str(cm.exception))
 
     def test_frontend_vercel_builds_site_and_says_push(self):
         code, out = self.dry("frontend")

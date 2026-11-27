@@ -67,7 +67,8 @@ relif.yaml        one config: backend / frontend / deploy (`relif config` shows 
 backend/          the `relif` package (ledger, verdicts, CLI, capture server), Dockerfile, compose files
 frontend/         app.py (the stlite page) + build.py (stdlib: writes frontend/site/)
 tests/            python3 -m unittest discover -s tests -t .
-vercel.json       Vercel builds frontend/ on every push
+vercel.json       how Vercel builds frontend/ (git auto-deploys off: .github/workflows/ci.yml deploys)
+.github/workflows/ci.yml   tests → frontend to Vercel · backend image to GHCR
 ```
 
 Install the CLI: `pipx install ./backend` (needs PyYAML, installed with it). Then, from the repo folder:
@@ -75,18 +76,24 @@ Install the CLI: `pipx install ./backend` (needs PyYAML, installed with it). The
 ```bash
 relif config                    # effective settings and where each comes from (flag > env > relif.yaml > default)
 relif deploy backend            # per deploy.backend: docker | docker+tailscale | local (`relif serve`)
-relif deploy frontend           # builds frontend/site/ locally; Vercel does the same on push
+relif deploy frontend           # builds frontend/site/ locally; CI deploys the same to Vercel on push
 relif deploy backend --dry-run  # print the command instead
 ```
 
 ```yaml
 backend:  { home: ~/.relif, bind: 127.0.0.1:8765, public_url: "", max_upload_mb: 20 }
 frontend: { url: https://relif.vercel.app }        # its origin is the only one allowed to read /health
-deploy:   { frontend: vercel, backend: docker }
+deploy:   { frontend: vercel, backend: docker, backend_image: ghcr.io/tummala-hareesh/relif-backend:latest }
 ```
 
 The **backend** (ledger, receipts, capture server) always runs on your own machine. The **frontend** is a static
 page with no ledger in it; it is the only part that is hosted.
+
+**CI/CD (`.github/workflows/ci.yml`).** Every PR and push to `main` runs the tests (Python 3.10 + 3.13). After they
+pass, the frontend deploys to Vercel (a preview per PR, production from `main`) and, from `main` only, the backend
+is built into `ghcr.io/tummala-hareesh/relif-backend:latest` (and `:<sha>`). The image holds code only; your ledger
+never leaves your machine. `relif deploy backend` pulls it when `deploy.backend_image` is set (`""` = build locally).
+If the package is private, run `docker login ghcr.io` once with a token that has `read:packages`.
 
 ## Run the backend at home (Docker)
 
@@ -138,8 +145,10 @@ python3 -m http.server -d frontend/site 8000    # open http://localhost:8000 (fi
 A golden test runs every row of the verdict table through both `relif ask` and the page adapter and
 requires identical text.
 
-**Deploy (Vercel).** Import this repo in Vercel once (framework "Other"; `vercel.json` sets the build command
-and output folder). Every push to `main` then deploys production and every PR gets a preview URL. Put the
-production URL in `relif.yaml` → `frontend.url` and restart the backend so `/health` and the bookmark match.
-Tests run in GitHub Actions (`test.yml`); make that check required on `main` if a red test should block a
-deploy. Public; not tax advice.
+**Deploy (Vercel).** GitHub Actions deploys it, not Vercel's git integration (`vercel.json` turns that off, so
+untested commits never go live). One-time setup: `vercel link` in the repo (framework "Other"; `vercel.json` sets
+the build command and output folder), then add repo secrets `VERCEL_TOKEN` (vercel.com → Account → Tokens),
+`VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` (both in `.vercel/project.json`). Until they exist the deploy job skips
+with a notice. Every push to `main` then deploys production and every PR gets a preview URL. Put the production
+URL in `relif.yaml` → `frontend.url` and restart the backend so `/health` and the bookmark match. Make the `test`
+check required on `main` if a red test should also block merging. Public; not tax advice.
