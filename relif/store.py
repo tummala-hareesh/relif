@@ -19,7 +19,9 @@ import json
 import os
 import shutil
 import sqlite3
+import re
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -31,6 +33,10 @@ SCHEMA_VERSION = 1
 GENESIS = "0" * 64
 DB_NAME = "relif.db"
 ANCHORS = "anchors.log"
+MIN_YEAR, MAX_YEAR = 1900, 9000
+MAX_CENTS = 2 ** 63 - 1
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_EXT_RE = re.compile(r"^[a-z0-9]{0,10}$")
 
 _SCHEMA = """
 CREATE TABLE events(
@@ -161,6 +167,7 @@ class Store:
         self.conn = self._connect(db)
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if version != SCHEMA_VERSION:
+            self.conn.close()
             raise RelifError(f"store schema version {version}, this RELIF expects {SCHEMA_VERSION}")
 
     # ---- lifecycle -----------------------------------------------------------------------
@@ -185,6 +192,17 @@ class Store:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @contextmanager
+    def _tx(self):
+        """A write transaction that takes the lock before reading head / next ids."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -226,17 +244,25 @@ class Store:
         rented_pct = int(rented_pct)
         if not 0 <= rented_pct <= 100:
             raise RelifError("rented_pct must be between 0 and 100")
-        pid = (self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM properties").fetchone()[0]) + 1
-        payload = {"id": pid, "name": name, "address": address, "rented_pct": rented_pct,
-                   "acquired_on": _iso_date(acquired_on, "acquired_on"), "disposed_on": None}
-        with self.conn:
-            self._append("property.changed", None, payload)
+        acquired = _iso_date(acquired_on, "acquired_on")
+        with self._tx():
+            pid = (self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM properties").fetchone()[0]) + 1
+            self._append("property.changed", None, {"id": pid, "name": name, "address": address,
+                                                    "rented_pct": rented_pct, "acquired_on": acquired,
+                                                    "disposed_on": None})
         return pid
 
     def dispose_property(self, property_id: int, disposed_on) -> None:
         prop = self.property(property_id)
-        payload = {"id": prop["id"], "disposed_on": _iso_date(disposed_on, "disposed_on")}
-        with self.conn:
+        day = _iso_date(disposed_on, "disposed_on")
+        if day is None:
+            raise RelifError("disposal date is required")
+        if int(day[:4]) > MAX_YEAR:
+            raise RelifError(f"disposal year must be at most {MAX_YEAR}")
+        if prop["acquired_on"] and day < prop["acquired_on"]:
+            raise RelifError(f"disposal date {day} is before acquisition {prop['acquired_on']}")
+        payload = {"id": prop["id"], "disposed_on": day}
+        with self._tx():
             self._append("property.changed", None, payload)
 
     def property(self, property_id: int):
@@ -255,6 +281,8 @@ class Store:
             receipts: Iterable = ()) -> int:
         if not isinstance(amount_cents, int) or isinstance(amount_cents, bool):
             raise RelifError("amount must be integer cents")
+        if abs(amount_cents) > MAX_CENTS:
+            raise RelifError("amount is too large")
         if not vendor:
             raise RelifError("vendor is required")
         day = _iso_date(date, "date")
@@ -266,29 +294,37 @@ class Store:
         for p in paths:
             if not p.is_file():
                 raise RelifError(f"receipt file not found: {p}")
-        eid = (self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()[0]) + 1
+        year = int(tax_year) if tax_year is not None else int(day[:4])
+        if not MIN_YEAR <= year <= MAX_YEAR:
+            raise RelifError(f"tax year must be between {MIN_YEAR} and {MAX_YEAR}")
         payload = {
-            "id": eid, "date": day, "amount_cents": amount_cents, "vendor": vendor,
+            "date": day, "amount_cents": amount_cents, "vendor": vendor,
             "description": description, "property_id": property_id,
-            "tax_year": int(tax_year) if tax_year is not None else int(day[:4]),
+            "tax_year": year,
             "category": category, "verdict": verdict, "is_capital": bool(is_capital), "cca_class": cca_class,
             "filed_late_on": _iso_date(filed_late_on, "filed_late_on"), "on_hold": bool(on_hold),
         }
         stored = [self._store_receipt(p) for p in paths]  # files first: content-addressed, idempotent
-        with self.conn:
-            self._append("entry.created", eid, payload)
-            for sha, ext, size, name in stored:
-                self._append("receipt.attached", eid,
-                             {"sha256": sha, "ext": ext, "bytes": size, "original_name": name})
+        with self._tx():
+            eid = (self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()[0]) + 1
+            self._append("entry.created", eid, {"id": eid, **payload})
+            for receipt in stored:
+                self._append_receipt(eid, receipt)
         return eid
+
+    def _append_receipt(self, entry_id: int, stored) -> None:
+        sha, ext, size, name = stored
+        self._append("receipt.attached", entry_id, {"sha256": sha, "ext": ext, "bytes": size, "original_name": name})
 
     def attach(self, entry_id: int, receipt) -> str:
         self.entry(entry_id)
-        sha, ext, size, name = self._store_receipt(Path(receipt).expanduser())
-        with self.conn:
-            self._append("receipt.attached", entry_id,
-                         {"sha256": sha, "ext": ext, "bytes": size, "original_name": name})
-        return sha
+        path = Path(receipt).expanduser()
+        if not path.is_file():
+            raise RelifError(f"receipt file not found: {path}")
+        stored = self._store_receipt(path)
+        with self._tx():
+            self._append_receipt(entry_id, stored)
+        return stored[0]
 
     def void(self, entry_id: int, reason: str) -> None:
         entry = self.entry(entry_id)
@@ -296,7 +332,7 @@ class Store:
             raise RelifError(f"entry #{entry_id} is already voided")
         if not reason:
             raise RelifError("a reason is required to void an entry")
-        with self.conn:
+        with self._tx():
             self._append("entry.voided", entry_id, {"reason": reason})
 
     def entry(self, entry_id: int):
@@ -315,8 +351,9 @@ class Store:
             sql += " AND property_id = ?"
             args.append(property_id)
         if search:
-            sql += " AND (vendor LIKE ? OR description LIKE ?)"
-            args += [f"%{search}%"] * 2
+            sql += r" AND (vendor LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')"
+            pattern = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args += [f"%{pattern}%"] * 2
         if not include_voided:
             sql += " AND voided = 0"
         return self.conn.execute(sql + " ORDER BY date, id", args).fetchall()
@@ -328,11 +365,15 @@ class Store:
 
     # ---- receipts ------------------------------------------------------------------------
     def receipt_path(self, sha: str, ext: str) -> Path:
+        if not _SHA_RE.match(sha or "") or not _EXT_RE.match(ext or ""):
+            raise RelifError(f"invalid receipt id {sha!r}.{ext!r}")
         return self.root / "receipts" / sha[:2] / sha[2:4] / (sha + (f".{ext}" if ext else ""))
 
     def _store_receipt(self, src: Path):
         sha = sha256_file(src)
         ext = src.suffix.lstrip(".").lower()
+        if not _EXT_RE.match(ext):
+            ext = ""
         dest = self.receipt_path(sha, ext)
         if not dest.exists():
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -347,25 +388,18 @@ class Store:
         return sha, ext, src.stat().st_size, src.name
 
     # ---- anchors -------------------------------------------------------------------------
-    def anchor(self, note: str = "") -> dict:
+    def anchor_record(self, note: str = "") -> dict:
         seq, head = self.head()
-        record = {"ts": self._now(), "seq": seq, "head": head, "note": note}
+        return {"ts": self._now(), "seq": seq, "head": head, "note": note}
+
+    def anchor(self, note: str = "", record: Optional[dict] = None) -> dict:
+        record = record or self.anchor_record(note)
         with open(self.root / ANCHORS, "a", encoding="utf-8") as f:
             f.write(canonical_json(record) + "\n")
         return record
 
     def anchors(self) -> list:
-        path = self.root / ANCHORS
-        if not path.exists():
-            return []
-        out = []
-        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if line.strip():
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    out.append({"invalid": n})
-        return out
+        return _read_anchors(self.root / ANCHORS)
 
     # ---- verify --------------------------------------------------------------------------
     def verify(self) -> VerifyReport:
@@ -388,9 +422,20 @@ class Store:
             hashes[seq] = row["row_hash"]
             report.head_seq, report.head_hash = seq, row["row_hash"]
 
-        for a in self.anchors():
+        live = self.anchors()
+        live_keys = {(a.get("seq"), a.get("head")) for a in live if "invalid" not in a}
+        exported = []
+        for copy in sorted((self.root / "exports").glob("*/anchors.log")):
+            for a in _read_anchors(copy):
+                if "invalid" in a:
+                    report.problems.append(f"{copy.parent.name}/anchors.log line {a['invalid']} is not a valid anchor")
+                elif (a["seq"], a["head"]) not in live_keys:
+                    report.problems.append(
+                        f"anchor from export {copy.parent.name} (event {a['seq']}) is missing from anchors.log")
+                    exported.append(a)
+        for a in live + exported:
             if "invalid" in a:
-                report.problems.append(f"anchors.log line {a['invalid']} is not valid JSON")
+                report.problems.append(f"anchors.log line {a['invalid']} is not a valid anchor")
                 continue
             report.last_anchor = a
             if a["seq"] > report.head_seq:
@@ -401,15 +446,21 @@ class Store:
 
         for r in self.conn.execute("SELECT * FROM receipts ORDER BY sha256"):
             report.receipts += 1
-            path = self.receipt_path(r["sha256"], r["ext"])
+            try:
+                path = self.receipt_path(r["sha256"], r["ext"])
+            except RelifError as exc:
+                report.problems.append(str(exc))
+                continue
             if not path.exists():
                 report.problems.append(f"receipt missing: {r['original_name']} ({r['sha256'][:12]})")
             elif sha256_file(path) != r["sha256"]:
                 report.problems.append(f"receipt modified: {r['original_name']} ({r['sha256'][:12]})")
 
-        drift = self._derived_drift()
+        drift, replay_errors = self._derived_drift(with_errors=True)
+        report.problems.extend(replay_errors)
         if drift:
-            report.problems.append(f"derived tables differ from the event log: {', '.join(drift)}")
+            report.problems.append(f"derived tables differ from the event log: {', '.join(drift)}"
+                                   " (`relif rebuild` restores them from the log)")
 
         for row in self.conn.execute(
                 "SELECT e.tax_year, COUNT(DISTINCT e.id) AS n, COUNT(er.sha256) AS r FROM entries e"
@@ -417,20 +468,17 @@ class Store:
             report.years[row["tax_year"]] = (row["n"], row["r"])
         return report
 
-    def _derived_drift(self) -> list:
+    def _derived_drift(self, with_errors: bool = False):
         """Replay the event log into memory and compare with the stored derived tables."""
         mem = sqlite3.connect(":memory:")
         mem.row_factory = sqlite3.Row
         mem.executescript(_DERIVED)
+        errors = []
         for row in self.events():
             try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError:
-                continue
-            try:
-                _apply(mem, row["kind"], row["entry_id"], payload, row["ts"])
-            except (sqlite3.Error, KeyError, TypeError):
-                pass
+                _apply(mem, row["kind"], row["entry_id"], json.loads(row["payload_json"]), row["ts"])
+            except Exception as exc:  # noqa: BLE001 - any failure here is evidence, report it
+                errors.append(f"event {row['seq']} cannot be applied: {exc}")
         drift = []
         for table in _DERIVED_TABLES:
             mine = [tuple(r) for r in self.conn.execute(f"SELECT * FROM {table} ORDER BY 1, 2")]
@@ -438,7 +486,7 @@ class Store:
             if mine != theirs:
                 drift.append(table)
         mem.close()
-        return drift
+        return (drift, errors) if with_errors else drift
 
     def rebuild(self) -> None:
         """Recreate the derived tables from the event log (repairs drift; history is untouched)."""
@@ -460,6 +508,8 @@ def _apply(conn: sqlite3.Connection, kind: str, entry_id, payload: dict, ts: str
     elif kind == "entry.voided":
         conn.execute("UPDATE entries SET voided = 1, void_reason = ? WHERE id = ?", (payload["reason"], entry_id))
     elif kind == "receipt.attached":
+        if not _SHA_RE.match(str(payload["sha256"])) or not _EXT_RE.match(str(payload["ext"])):
+            raise RelifError("receipt.attached has an invalid sha256 or extension")
         conn.execute("INSERT OR IGNORE INTO receipts(sha256, ext, bytes, original_name, added_at) VALUES (?,?,?,?,?)",
                      (payload["sha256"], payload["ext"], payload["bytes"], payload.get("original_name"), ts))
         conn.execute("INSERT OR IGNORE INTO entry_receipts(entry_id, sha256) VALUES (?,?)",
@@ -486,11 +536,7 @@ def _refresh_retention(conn: sqlite3.Connection, where: str, args: tuple) -> Non
         "SELECT e.id, e.tax_year, e.filed_late_on, e.on_hold, e.is_capital, p.disposed_on FROM entries e"
         f" LEFT JOIN properties p ON p.id = e.property_id WHERE e.{where}", args).fetchall()
     for r in rows:
-        ret = retention(
-            r["tax_year"],
-            filed_late_on=date.fromisoformat(r["filed_late_on"]) if r["filed_late_on"] else None,
-            on_hold=bool(r["on_hold"]), is_capital=bool(r["is_capital"]),
-            disposed_on=date.fromisoformat(r["disposed_on"]) if r["disposed_on"] else None)
+        ret = entry_retention(r, r["disposed_on"])
         conn.execute("UPDATE entries SET retain_until = ?, retention_rule = ? WHERE id = ?",
                      (ret.retain_until.isoformat() if ret.retain_until else None, ret.rule, r["id"]))
 
@@ -502,3 +548,21 @@ def entry_retention(entry, disposed_on: Optional[str] = None):
         filed_late_on=date.fromisoformat(entry["filed_late_on"]) if entry["filed_late_on"] else None,
         on_hold=bool(entry["on_hold"]), is_capital=bool(entry["is_capital"]),
         disposed_on=date.fromisoformat(disposed_on) if disposed_on else None)
+
+
+def _read_anchors(path: Path) -> list:
+    """Anchor records from an anchors.log; malformed lines become {"invalid": line_number}."""
+    if not path.exists():
+        return []
+    out = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            a = json.loads(line)
+        except json.JSONDecodeError:
+            a = None
+        ok = (isinstance(a, dict) and isinstance(a.get("seq"), int) and not isinstance(a.get("seq"), bool)
+              and isinstance(a.get("ts"), str) and isinstance(a.get("head"), str) and _SHA_RE.match(a["head"]))
+        out.append(a if ok else {"invalid": n})
+    return out
