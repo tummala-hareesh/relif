@@ -24,7 +24,7 @@ class DemoWorkflowTest(unittest.TestCase):
     def test_tests_run_before_the_build_and_deploy(self):
         tests = self.config.index("python3 -m unittest discover -s tests")
         build = self.config.index("python3 -m relif.demo build --out site")
-        deploy = self.config.index("peaceiris/actions-gh-pages@v4")
+        deploy = self.config.index("peaceiris/actions-gh-pages@")
         self.assertLess(tests, build)
         self.assertLess(build, deploy)
 
@@ -42,6 +42,12 @@ class DemoWorkflowTest(unittest.TestCase):
         self.assertNotIn("deploy-pages", self.config)
         self.assertNotIn("upload-pages-artifact", self.config)
         self.assertRegex(self.config, r"(?m)^\s*contents: read\s*$")
+
+    def test_third_party_actions_that_see_the_deploy_key_are_pinned_to_a_commit(self):
+        # Tags can be moved; the action handling DEMO_DEPLOY_KEY must be a full commit SHA.
+        for action in re.findall(r"uses:\s*(\S+)", self.config):
+            if not action.startswith("actions/"):
+                self.assertRegex(action, r"@[0-9a-f]{40}$", action)
 
     def test_does_not_use_the_repo_token_for_the_push(self):
         self.assertNotRegex(self.config, r"github_token|personal_token|GITHUB_TOKEN")
