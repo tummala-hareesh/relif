@@ -229,7 +229,7 @@ def _deploy_commands(cfg, target):
             return None, {}, "deploy.frontend is none: nothing to deploy."
         site = root / "frontend" / "site"
         return ([sys.executable, str(root / "frontend" / "build.py"), "--out", str(site)], {},
-                f"Built {site} locally. Vercel builds and deploys the same on every push to main "
+                f"Built {site} locally. The ci workflow deploys the same to Vercel on every push to main "
                 f"(preview per PR): {cfg.frontend_url}")
     if cfg.deploy_backend == "local":
         argv = [sys.executable, "-m", "relif", "--config", str(cfg.path), "serve"]
@@ -238,6 +238,9 @@ def _deploy_commands(cfg, target):
     if cfg.deploy_backend == "docker+tailscale":
         files += ["-f", str(root / "backend" / "compose.tailscale.yaml")]
     env = {"RELIF_PORT": str(cfg.port), "RELIF_HOME": str(cfg.home), "RELIF_CONFIG_FILE": str(cfg.path)}
+    if cfg.backend_image:   # the image CI publishes on every push to main: pull it instead of building here
+        env["RELIF_IMAGE"] = cfg.backend_image
+        return ["docker", "compose", *files, "up", "-d", "--pull", "always"], env, None
     return ["docker", "compose", *files, "up", "-d", "--build"], env, None
 
 

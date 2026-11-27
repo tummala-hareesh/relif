@@ -2,7 +2,8 @@
 
     backend:  home, bind (host:port), public_url, max_upload_mb
     frontend: url (the deployed page; also the only CORS origin for /health)
-    deploy:   frontend (vercel | none), backend (docker | docker+tailscale | local)
+    deploy:   frontend (vercel | none), backend (docker | docker+tailscale | local),
+              backend_image (prebuilt image to pull, e.g. ghcr.io/<owner>/relif-backend:latest; "" = build here)
 
 Found via `relif --config PATH`, then $RELIF_CONFIG, then ./relif.yaml; no file means the defaults.
 Precedence: command-line flag > environment ($RELIF_HOME, $RELIF_PUBLIC_URL) > relif.yaml > defaults.
@@ -11,6 +12,7 @@ Unknown keys and bad values are errors that name the key. Never shipped to the b
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -23,8 +25,9 @@ BACKENDS = ("docker", "docker+tailscale", "local")
 DEFAULTS = {
     "backend": {"home": "~/.relif", "bind": "127.0.0.1:8765", "public_url": "", "max_upload_mb": 20},
     "frontend": {"url": "https://relif.vercel.app"},
-    "deploy": {"frontend": "vercel", "backend": "docker"},
+    "deploy": {"frontend": "vercel", "backend": "docker", "backend_image": ""},
 }
+IMAGE_RE = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$")
 ENV = {"backend.home": "RELIF_HOME", "backend.public_url": "RELIF_PUBLIC_URL"}
 
 
@@ -44,6 +47,7 @@ class Config:
     frontend_origin: str
     deploy_frontend: str
     deploy_backend: str
+    backend_image: str = ""
     values: dict = field(default_factory=dict)   # "section.key" -> effective raw value
     source: dict = field(default_factory=dict)   # "section.key" -> default | file | env
 
@@ -148,7 +152,11 @@ def load(path=None) -> Config:
     for name, allowed in (("deploy.frontend", FRONTENDS), ("deploy.backend", BACKENDS)):
         if values[name] not in allowed:
             raise ConfigError(f"{name} must be one of {', '.join(allowed)} (got {values[name]!r})")
+    image = str(values["deploy.backend_image"] or "").strip()
+    if image and not IMAGE_RE.match(image):
+        raise ConfigError(f"deploy.backend_image must be an image reference like ghcr.io/<owner>/relif-backend:latest "
+                          f"(got {values['deploy.backend_image']!r})")
     return Config(path=found, home=Path(str(values["backend.home"])).expanduser(), host=host, port=port,
                   public_url=public or None, max_upload_mb=mb, frontend_url=url, frontend_origin=origin,
                   deploy_frontend=values["deploy.frontend"], deploy_backend=values["deploy.backend"],
-                  values=values, source=source)
+                  backend_image=image, values=values, source=source)
