@@ -15,17 +15,26 @@ tamper evidence for the ledger.
 from __future__ import annotations
 
 import csv
-import hashlib
 import re
 import shutil
 from datetime import date
 from pathlib import Path
 
 from .money import format_cents
-from .store import ANCHORS, RelifError, Store, sha256_file
+from .store import ANCHORS, RelifError, Store, canonical_json, sha256_file
 
 DISCLAIMER = ("RELIF is a record-keeping tool, not tax advice. It never files anything with the CRA. "
               "Check categories and deductibility with the CRA guide T4036 or an accountant.")
+
+NO_END_DATE = "keep (no end date)"
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell(value) -> str:
+    """Text cell safe to open in a spreadsheet (no formula injection from vendor/description)."""
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_FORMULA_START) else text
+
 
 LEDGER_COLUMNS = ["entry_id", "date", "tax_year", "property", "vendor", "description", "amount",
                   "category", "verdict", "is_capital", "cca_class", "voided", "void_reason",
@@ -37,10 +46,14 @@ def _slug(text: str, limit: int = 30) -> str:
     return s[:limit].strip("-") or "x"
 
 
-def export_year(store: Store, year: int, *, force: bool = False) -> Path:
+def export_year(store: Store, year: int, *, force: bool = False, allow_unverified: bool = False) -> Path:
     out = store.root / "exports" / str(year)
     if out.exists() and not force:
         raise RelifError(f"{out} already exists (use --force to replace it)")
+    if not allow_unverified:
+        report = store.verify()
+        if not report.ok:
+            raise RelifError("ledger does not verify, refusing to export: " + "; ".join(report.problems))
     tmp = out.with_name(f".{year}.partial")
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -64,14 +77,19 @@ def export_year(store: Store, year: int, *, force: bool = False) -> Path:
                 used.add(name)
                 src = store.receipt_path(r["sha256"], r["ext"])
                 if not src.exists():
+                    shutil.rmtree(tmp)
                     raise RelifError(f"receipt missing for entry #{e['id']}: run `relif verify`")
-                shutil.copyfile(src, tmp / "receipts" / name)
+                dest = tmp / "receipts" / name
+                shutil.copyfile(src, dest)
+                if sha256_file(dest) != r["sha256"]:
+                    shutil.rmtree(tmp)
+                    raise RelifError(f"receipt for entry #{e['id']} does not match its hash: run `relif verify`")
                 names.append(name)
-            w.writerow([e["id"], e["date"], e["tax_year"], props.get(e["property_id"], ""), e["vendor"],
-                        e["description"] or "", format_cents(e["amount_cents"]), e["category"] or "",
-                        e["verdict"] or "", "yes" if e["is_capital"] else "no", e["cca_class"] or "",
-                        "yes" if e["voided"] else "no", e["void_reason"] or "",
-                        e["retain_until"] or "keep (no end date)", e["retention_rule"] or "", " ".join(names)])
+            w.writerow([e["id"], e["date"], e["tax_year"], _cell(props.get(e["property_id"])), _cell(e["vendor"]),
+                        _cell(e["description"]), format_cents(e["amount_cents"]), _cell(e["category"]),
+                        _cell(e["verdict"]), "yes" if e["is_capital"] else "no", _cell(e["cca_class"]),
+                        "yes" if e["voided"] else "no", _cell(e["void_reason"]),
+                        e["retain_until"] or NO_END_DATE, e["retention_rule"] or "", " ".join(names)])
 
     totals = {}
     for e in entries:
@@ -83,7 +101,7 @@ def export_year(store: Store, year: int, *, force: bool = False) -> Path:
         w = csv.writer(f)
         w.writerow(["property", "category", "total"])
         for (prop, cat), cents in sorted(totals.items()):
-            w.writerow([prop, cat, format_cents(cents)])
+            w.writerow([_cell(prop), _cell(cat), format_cents(cents)])
 
     capital = [e for e in store.entries(include_voided=False) if e["is_capital"] and e["tax_year"] <= year]
     with open(tmp / "capital_register.csv", "w", newline="", encoding="utf-8") as f:
@@ -91,12 +109,14 @@ def export_year(store: Store, year: int, *, force: bool = False) -> Path:
         w.writerow(["entry_id", "date", "tax_year", "property", "vendor", "description", "amount",
                     "cca_class", "retain_until"])
         for e in capital:
-            w.writerow([e["id"], e["date"], e["tax_year"], props.get(e["property_id"], ""), e["vendor"],
-                        e["description"] or "", format_cents(e["amount_cents"]), e["cca_class"] or "",
-                        e["retain_until"] or "keep (no end date)"])
+            w.writerow([e["id"], e["date"], e["tax_year"], _cell(props.get(e["property_id"])), _cell(e["vendor"]),
+                        _cell(e["description"]), format_cents(e["amount_cents"]), _cell(e["cca_class"]),
+                        e["retain_until"] or NO_END_DATE])
 
-    anchor = store.anchor(f"export {year}")
-    shutil.copyfile(store.root / ANCHORS, tmp / "anchors.log")
+    anchor = store.anchor_record(f"export {year}")  # written to anchors.log only once the bundle is in place
+    live_log = store.root / ANCHORS
+    previous = live_log.read_text(encoding="utf-8") if live_log.exists() else ""
+    (tmp / "anchors.log").write_text(previous + canonical_json(anchor) + "\n", encoding="utf-8")
 
     live = [e for e in entries if not e["voided"]]
     until = sorted({e["retain_until"] for e in entries if e["retain_until"]})
@@ -130,22 +150,38 @@ def export_year(store: Store, year: int, *, force: bool = False) -> Path:
         lines.append(f"{sha256_file(path)}  {path.relative_to(tmp).as_posix()}")
     (tmp / "MANIFEST.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    old = out.with_name(f".{year}.old")
+    if old.exists():
+        shutil.rmtree(old)
     if out.exists():
-        shutil.rmtree(out)
+        out.rename(old)  # keep the previous bundle until the new one is in place
     tmp.rename(out)
+    store.anchor(record=anchor)
+    if old.exists():
+        shutil.rmtree(old)
     return out
 
 
 def check_manifest(bundle: Path) -> list:
     """Problems found re-hashing a bundle against its MANIFEST.sha256 (empty list = intact)."""
     problems, listed = [], set()
-    for line in (bundle / "MANIFEST.sha256").read_text(encoding="utf-8").splitlines():
-        digest, _, rel = line.partition("  ")
-        listed.add(rel)
+    root = bundle.resolve()
+    for n, line in enumerate((bundle / "MANIFEST.sha256").read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        digest, sep, rel = line.partition(" ")
+        rel = rel[1:] if rel[:1] in (" ", "*") else rel  # sha256sum text ("  ") or binary (" *") mode
+        if not sep or not rel or len(digest) != 64:
+            problems.append(f"MANIFEST line {n} is malformed")
+            continue
         path = bundle / rel
-        if not path.exists():
+        if root not in path.resolve().parents:
+            problems.append(f"MANIFEST line {n} points outside the bundle: {rel}")
+            continue
+        listed.add(rel)
+        if not path.is_file():
             problems.append(f"missing: {rel}")
-        elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        elif sha256_file(path) != digest:
             problems.append(f"changed: {rel}")
     for path in bundle.rglob("*"):
         rel = path.relative_to(bundle).as_posix()
