@@ -7,7 +7,7 @@ name = "relif"
 version = "0.1.0"
 description = "Local-first, tamper-evident 6-year ledger for rental expense logs and receipts"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
