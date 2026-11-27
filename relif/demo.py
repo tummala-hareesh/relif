@@ -76,7 +76,7 @@ mount({{ entrypoint: "app.py", requirements: [], files }}, document.getElementBy
 
 
 def build_html(root: Path) -> str:
-    files = {dest: (Path(root) / src).read_text() for dest, src in PAGE_FILES.items()}
+    files = {dest: (Path(root) / src).read_text(encoding="utf-8") for dest, src in PAGE_FILES.items()}
     data = json.dumps(files, sort_keys=True).replace("<", "\\u003c")   # can't close the <script> early
     return _PAGE.format(version=STLITE_VERSION, files=data)
 
@@ -89,7 +89,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "index.html").write_text(build_html(Path(__file__).resolve().parent.parent))
+    (out / "index.html").write_text(build_html(Path(__file__).resolve().parent.parent), encoding="utf-8")
     (out / ".nojekyll").write_text("")
     print(f"wrote {out / 'index.html'}", file=sys.stderr)
     return 0
