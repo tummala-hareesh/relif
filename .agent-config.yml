@@ -4,7 +4,7 @@ origin: fresh            # fresh | in-between | published
 repo: tummala-hareesh/relif
 default_branch: main
 stack: [python]
-test_command: "python3 -m unittest discover -s tests"   # TDD; tests/ arrives with the first build
+test_command: "python3 -m unittest discover -s tests -t ."
 # CLAUDE.md is the source of truth for conventions; agent-megastar reads it, never overwrites it.
 claude_md: null
 telegram:
