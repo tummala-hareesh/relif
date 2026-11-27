@@ -1,6 +1,7 @@
-# RELIF at home: `docker compose up -d --build` (first time: `docker compose run --rm relif init`).
-# The capture page is published on the laptop only (127.0.0.1:8765). For your phone from anywhere, add the
-# Tailscale sidecar: `docker compose -f compose.yaml -f compose.tailscale.yaml up -d` (see README).
+# RELIF backend at home. Easiest: `relif deploy backend` from the repo root (reads relif.yaml: deploy.backend picks
+# docker or docker+tailscale, backend.bind's port is published on 127.0.0.1). By hand, from backend/:
+# `docker compose up -d --build` (first time: `docker compose run --rm relif init`).
+# relif.yaml is mounted read-only; the container's own RELIF_HOME (/data) and --host 0.0.0.0 win over it.
 services:
   relif:
     build:
@@ -12,10 +13,12 @@ services:
     restart: unless-stopped
     environment:
       RELIF_PUBLIC_URL: ${RELIF_PUBLIC_URL:-}
+      RELIF_CONFIG: /etc/relif/relif.yaml
     volumes:
       - ${RELIF_HOME:-~/.relif}:/data
+      - ${RELIF_CONFIG_FILE:-../relif.yaml}:/etc/relif/relif.yaml:ro
     ports:
-      - "127.0.0.1:8765:8765"
+      - "127.0.0.1:${RELIF_PORT:-8765}:8765"
     read_only: true
     tmpfs:
       - /tmp

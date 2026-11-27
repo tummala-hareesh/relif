@@ -4,7 +4,7 @@ Security rules: binds 127.0.0.1 unless --lan/--host; every page needs the pairin
 request bodies are size-capped; there are no edit or delete routes (corrections stay void + re-add in the CLI).
 Behind HTTPS (`--public-url`, e.g. Tailscale serve) the cookie is `Secure` and any other Host header gets 421,
 which also blocks DNS rebinding. `GET /health` is the one unauthenticated route: `{"ok", "version"}` only, no
-ledger data, readable cross-origin by the Pages demo origin alone.
+ledger data, readable cross-origin by the frontend's origin (relif.yaml frontend.url) alone.
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from . import __version__
 from .capture import answers_for, log_expense
 from .money import format_cents, parse_cents
 from .store import RelifError, Store
+from .config import DEFAULTS, parse_frontend_url
 from .verdict import KINDS, LOAN_PARTS, TRI, USES, WORK, decide
 
 COOKIE = "relif_session"
@@ -38,8 +39,7 @@ TOKEN_FILE = "serve.token"
 REQUEST_TIMEOUT = 30  # seconds per socket read: a stalled client can't hold a thread forever
 DEFAULT_PORT = 8765
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
-PAGES_ORIGIN = "https://tummala-hareesh.github.io"   # the public demo page; the only CORS origin, /health only
-PAGES_DEMO = PAGES_ORIGIN + "/relif-demo/"
+DEFAULT_FRONTEND = DEFAULTS["frontend"]["url"]   # relif.yaml frontend.url: the page's origin is the only CORS origin
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}   # container healthcheck / same machine
 _SAFE_NAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 HEADERS = {
@@ -77,9 +77,9 @@ def validate_public_url(url: str) -> str:
     return f"https://{host}" + (f":{port}" if port and port != 443 else "")
 
 
-def pages_bookmark(public_url: str) -> str:
-    """The Pages demo link that knows this server. The address rides in the fragment: never sent to GitHub."""
-    return f"{PAGES_DEMO}#server={public_url}"
+def pages_bookmark(public_url: str, frontend_url: str = DEFAULT_FRONTEND) -> str:
+    """The frontend link that knows this server. The address rides in the fragment: never sent to the host."""
+    return f"{frontend_url.rstrip('/')}/#server={public_url}"
 
 
 def _host_name(host_header: str) -> str:
@@ -186,7 +186,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
         if url.path == "/health":
             body = json.dumps({"ok": True, "version": __version__}).encode()
             return self.send(200, body, "application/json",
-                             headers={"Access-Control-Allow-Origin": PAGES_ORIGIN, "Vary": "Origin"})
+                             headers={"Access-Control-Allow-Origin": self.server.frontend_origin, "Vary": "Origin"})
         if url.path == "/pair":
             given = (parse_qs(url.query).get("t") or [""])[0]
             if not hmac.compare_digest(given.encode(), self.server.token.encode()):
@@ -258,7 +258,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
             return self.fail(421, "Wrong address for this RELIF server.", close=True)
         if urlsplit(self.path).path != "/health":
             return self.fail(405, "Not allowed.", close=True)
-        self.send(204, headers={"Access-Control-Allow-Origin": PAGES_ORIGIN, "Access-Control-Allow-Methods": "GET",
+        self.send(204, headers={"Access-Control-Allow-Origin": self.server.frontend_origin, "Access-Control-Allow-Methods": "GET",
                                 "Access-Control-Allow-Private-Network": "true", "Access-Control-Max-Age": "600",
                                 "Vary": "Origin"})
 
@@ -369,8 +369,10 @@ class CaptureHandler(BaseHTTPRequestHandler):
 class CaptureServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, home, address, token: str, max_bytes: int, quiet: bool = False, public_url: str = None):
+    def __init__(self, home, address, token: str, max_bytes: int, quiet: bool = False, public_url: str = None,
+                 frontend_url: str = DEFAULT_FRONTEND):
         self.home = Path(home)
+        self.frontend_url, self.frontend_origin = parse_frontend_url(frontend_url)
         self.public_url = validate_public_url(public_url) if public_url else None
         self.allowed_hosts = ({_host_name(urlsplit(self.public_url).netloc)} | _LOCAL_HOSTS) if self.public_url else set()
         if ":" in address[0]:
@@ -400,9 +402,10 @@ def pairing_token(home, *, rotate: bool = False) -> str:
 
 
 def make_server(home, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT, token: str = None,
-                max_bytes: int = DEFAULT_MAX_BYTES, quiet: bool = False, public_url: str = None) -> CaptureServer:
+                max_bytes: int = DEFAULT_MAX_BYTES, quiet: bool = False, public_url: str = None,
+                frontend_url: str = DEFAULT_FRONTEND) -> CaptureServer:
     Store(home).close()  # fail fast if there is no store
-    return CaptureServer(home, (host, port), token or pairing_token(home), max_bytes, quiet, public_url)
+    return CaptureServer(home, (host, port), token or pairing_token(home), max_bytes, quiet, public_url, frontend_url)
 
 
 def lan_address() -> str:

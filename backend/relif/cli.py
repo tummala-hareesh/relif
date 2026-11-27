@@ -8,7 +8,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import __version__
+from . import __version__, config
 from .backup import backup, restore_test
 from .capture import answers_for, log_expense
 from .export import export_year
@@ -17,8 +17,15 @@ from .store import RelifError, Store, entry_retention
 from .verdict import KINDS, LOAN_PARTS, TRI, USES, WORK, decide, verdict_lines
 
 
+def _cfg(args) -> config.Config:
+    """relif.yaml (+ environment), loaded once per command."""
+    if getattr(args, "_config", None) is None:
+        args._config = config.load(getattr(args, "config", None))
+    return args._config
+
+
 def _home(args) -> Path:
-    return Path(args.home or os.environ.get("RELIF_HOME") or "~/.relif").expanduser()
+    return Path(args.home).expanduser() if args.home else _cfg(args).home
 
 
 def _open(args) -> Store:
@@ -160,19 +167,24 @@ def cmd_retention(args, out):
 
 def cmd_serve(args, out):
     from . import web
-    if args.max_mb < 1:
+    cfg = _cfg(args)
+    max_mb = args.max_mb if args.max_mb is not None else cfg.max_upload_mb
+    if max_mb < 1:
         raise RelifError("--max-mb must be at least 1")
-    public = args.public_url if args.public_url is not None else os.environ.get("RELIF_PUBLIC_URL", "")
-    try:
-        public = web.validate_public_url(public) if public.strip() else None
-    except ValueError as exc:
-        raise RelifError(str(exc)) from None
-    host = args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
+    if args.public_url is not None:
+        try:
+            public = web.validate_public_url(args.public_url) if args.public_url.strip() else None
+        except ValueError as exc:
+            raise RelifError(str(exc)) from None
+    else:
+        public = cfg.public_url
+    host = args.host or ("0.0.0.0" if args.lan else cfg.host)
+    port = args.port if args.port is not None else cfg.port
     with _open(args):  # fail fast before touching the store folder
         pass
     token = web.pairing_token(_home(args), rotate=args.new_token)
-    server = web.make_server(_home(args), host=host, port=args.port, token=token,
-                             max_bytes=args.max_mb * 1024 * 1024, public_url=public)
+    server = web.make_server(_home(args), host=host, port=port, token=token,
+                             max_bytes=max_mb * 1024 * 1024, public_url=public, frontend_url=cfg.frontend_url)
     if public:
         base = public
     else:
@@ -184,8 +196,8 @@ def cmd_serve(args, out):
         print(f"On this machine (or in Docker): http://127.0.0.1:{server.server_address[1]}/pair?t={server.token}",
               file=out)
     if public:
-        print(f"Bookmark on your phone (the address stays in the link, never on GitHub): "
-              f"{web.pages_bookmark(public)}", file=out)
+        print(f"Bookmark on your phone (the address stays in the link, never on the web host): "
+              f"{web.pages_bookmark(public, cfg.frontend_url)}", file=out)
     elif host not in ("127.0.0.1", "localhost", "::1"):
         print("Listening on your local network over plain HTTP: use it on trusted Wi-Fi or Tailscale only.",
               file=out)
@@ -196,6 +208,54 @@ def cmd_serve(args, out):
         pass
     finally:
         server.server_close()
+
+
+def cmd_config(args, out):
+    cfg = _cfg(args)
+    print(f"config: {cfg.path or 'none found (defaults)'}", file=out)
+    width = max(map(len, cfg.values))
+    for name, value in cfg.values.items():
+        print(f"  {name:<{width}}  {value!s:<28} ({cfg.source[name]})", file=out)
+    return 0
+
+
+def _deploy_commands(cfg, target):
+    """(argv, extra env, note) for `relif deploy <target>`."""
+    root = cfg.root
+    if root is None:
+        raise RelifError("deploy needs relif.yaml (run it in the repo folder, or pass --config / set $RELIF_CONFIG)")
+    if target == "frontend":
+        if cfg.deploy_frontend == "none":
+            return None, {}, "deploy.frontend is none: nothing to deploy."
+        site = root / "frontend" / "site"
+        return ([sys.executable, str(root / "frontend" / "build.py"), "--out", str(site)], {},
+                f"Built {site} locally. Vercel builds and deploys the same on every push to main "
+                f"(preview per PR): {cfg.frontend_url}")
+    if cfg.deploy_backend == "local":
+        argv = [sys.executable, "-m", "relif", "--config", str(cfg.path), "serve"]
+        return argv, {}, None
+    files = ["-f", str(root / "backend" / "compose.yaml")]
+    if cfg.deploy_backend == "docker+tailscale":
+        files += ["-f", str(root / "backend" / "compose.tailscale.yaml")]
+    env = {"RELIF_PORT": str(cfg.port), "RELIF_HOME": str(cfg.home), "RELIF_CONFIG_FILE": str(cfg.path)}
+    return ["docker", "compose", *files, "up", "-d", "--build"], env, None
+
+
+def cmd_deploy(args, out):
+    import shlex
+    import subprocess
+    argv, env, note = _deploy_commands(_cfg(args), args.target)
+    if argv:
+        shown = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+        print(f"{'would run' if args.dry_run else 'running'}: {shown + ' ' if shown else ''}{shlex.join(argv)}",
+              file=out, flush=True)
+        if not args.dry_run:
+            code = subprocess.run(argv, env={**os.environ, **env}).returncode
+            if code:
+                return code
+    if note:
+        print(note, file=out)
+    return 0
 
 
 def _result(res, out):
@@ -213,7 +273,8 @@ def cmd_restore_test(args, out):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="relif", description="Tamper-evident 6-year ledger for rental expenses.")
-    p.add_argument("--home", help="store folder (default $RELIF_HOME or ~/.relif)")
+    p.add_argument("--home", help="store folder (default $RELIF_HOME, then relif.yaml backend.home, then ~/.relif)")
+    p.add_argument("--config", help="relif.yaml to use (default $RELIF_CONFIG, then ./relif.yaml)")
     p.add_argument("--version", action="version", version=f"relif {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -304,10 +365,18 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", help="bind address (overrides --lan; the Docker image uses 0.0.0.0)")
     sv.add_argument("--public-url", help="https address the server is reached at (e.g. Tailscale serve); "
                                          "default $RELIF_PUBLIC_URL. Secure cookie + Host check")
-    sv.add_argument("--port", type=int, default=8765)
-    sv.add_argument("--max-mb", type=int, default=20, help="upload size limit in MB")
+    sv.add_argument("--port", type=int, help="default: relif.yaml backend.bind (8765)")
+    sv.add_argument("--max-mb", type=int, help="upload size limit in MB (default: relif.yaml backend.max_upload_mb, 20)")
     sv.add_argument("--new-token", action="store_true", help="rotate the pairing token (unpairs every device)")
     sv.set_defaults(func=cmd_serve)
+
+    sub.add_parser("config", help="show the effective relif.yaml settings and where each comes from") \
+        .set_defaults(func=cmd_config)
+
+    dp = sub.add_parser("deploy", help="deploy the backend (per deploy.backend) or build the frontend")
+    dp.add_argument("target", choices=("backend", "frontend"))
+    dp.add_argument("--dry-run", action="store_true", help="print the command instead of running it")
+    dp.set_defaults(func=cmd_deploy)
 
     sub.add_parser("backup", help="restic backup of the store (if configured)").set_defaults(func=cmd_backup)
     sub.add_parser("restore-test", help="restore the latest backup to a temp dir and verify it") \
