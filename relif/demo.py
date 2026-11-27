@@ -85,13 +85,14 @@ function relifServer(hash) {{
                  a.textContent = link; box.append(" ", a); }}
     box.hidden = false;
   }};
-  say("Checking your RELIF at home...");
+  say("Checking " + new URL(origin).hostname + "...");
   const stop = new AbortController();
   setTimeout(() => stop.abort(), 3000);
   fetch(origin + "/health", {{ mode: "cors", credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer",
                               signal: stop.signal }})
     .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-    .then((j) => {{ if (j.ok !== true) throw new Error("bad health"); say("🟢 Your RELIF is online.", "Open my RELIF"); }})
+    .then((j) => {{ if (j.ok !== true) throw new Error("bad health");
+                   say("🟢 " + new URL(origin).hostname + " is online. Only open it if that is your own laptop.", "Open my RELIF"); }})
     .catch(() => say("😴 Your RELIF is not answering: the laptop is asleep or this phone is off your tailnet."));
 }})();
 </script>

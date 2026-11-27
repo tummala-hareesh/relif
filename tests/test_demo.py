@@ -152,6 +152,7 @@ class PageTest(unittest.TestCase):
         self.assertIn("location.hash", head)
         self.assertIn('credentials: "omit"', head)
         self.assertNotIn("innerHTML", head)
+        self.assertIn("new URL(origin).hostname", head)   # the page names the server, so a crafted link shows its host
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
     def test_home_link_accepts_only_https_tailnet_origins(self):
