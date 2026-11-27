@@ -180,6 +180,9 @@ def cmd_serve(args, out):
         base = f"http://{f'[{shown}]' if ':' in shown else shown}:{server.server_address[1]}"
     print(f"RELIF capture page on {base}/", file=out)
     print(f"Pair a device (keep this link private): {base}/pair?t={server.token}", file=out)
+    if not public and host in ("0.0.0.0", "::", ""):  # in Docker the LAN guess is the container's own address
+        print(f"On this machine (or in Docker): http://127.0.0.1:{server.server_address[1]}/pair?t={server.token}",
+              file=out)
     if public:
         print(f"Bookmark on your phone (the address stays in the link, never on GitHub): "
               f"{web.pages_bookmark(public)}", file=out)

@@ -70,6 +70,7 @@ Docker, restarts on its own and keeps the store in a normal host folder: `relif 
 
 ```bash
 cp .env.example .env                       # set RELIF_UID/RELIF_GID to `id -u` / `id -g`
+mkdir -p ~/.relif                          # create it yourself, or Docker makes it root-owned
 docker compose run --rm relif init         # once, if ~/.relif has no store yet
 docker compose up -d --build               # http://127.0.0.1:8765 on this laptop only
 xdg-open "http://127.0.0.1:8765/pair?t=$(cat ~/.relif/serve.token)"   # pair this browser
