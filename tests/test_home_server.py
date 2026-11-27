@@ -12,7 +12,9 @@ from unittest import mock
 from relif import __version__
 from relif.cli import build_parser, main
 from relif.store import Store
-from relif.web import PAGES_ORIGIN, make_server, pages_bookmark, validate_public_url
+from relif.web import make_server, pages_bookmark, validate_public_url
+
+FRONTEND = "https://relif.vercel.app"   # default frontend.url in relif.yaml
 
 TOKEN = "pairing-token-for-tests"
 PUBLIC = "https://relif.example-tailnet.ts.net"
@@ -54,10 +56,9 @@ class HealthTest(ServerCase):
         self.assertEqual(json.loads(body), {"ok": True, "version": __version__})
         self.assertNotIn("Duplex", body)
 
-    def test_health_allows_only_the_pages_origin(self):
+    def test_health_allows_only_the_frontend_origin(self):
         resp, _ = self.request("GET", "/health", {"Origin": "https://evil.example"})
-        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), PAGES_ORIGIN)
-        self.assertEqual(PAGES_ORIGIN, "https://tummala-hareesh.github.io")
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), FRONTEND)
         self.assertIsNone(resp.getheader("Access-Control-Allow-Credentials"))
 
     def test_cors_header_is_only_on_health(self):
@@ -66,10 +67,10 @@ class HealthTest(ServerCase):
             self.assertIsNone(resp.getheader("Access-Control-Allow-Origin"), path)
 
     def test_preflight_only_for_health(self):
-        resp, _ = self.request("OPTIONS", "/health", {"Origin": PAGES_ORIGIN,
+        resp, _ = self.request("OPTIONS", "/health", {"Origin": FRONTEND,
                                                       "Access-Control-Request-Private-Network": "true"})
         self.assertEqual(resp.status, 204)
-        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), PAGES_ORIGIN)
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), FRONTEND)
         self.assertEqual(resp.getheader("Access-Control-Allow-Private-Network"), "true")
         resp, _ = self.request("OPTIONS", "/add")
         self.assertEqual(resp.status, 405)
@@ -147,8 +148,29 @@ class ValidateTest(unittest.TestCase):
                 validate_public_url(bad)
 
     def test_bookmark_puts_the_server_in_the_fragment(self):
-        self.assertEqual(pages_bookmark(PUBLIC),
-                         "https://tummala-hareesh.github.io/relif-demo/#server=https://relif.example-tailnet.ts.net")
+        self.assertEqual(pages_bookmark(PUBLIC), FRONTEND + "/#server=https://relif.example-tailnet.ts.net")
+        self.assertEqual(pages_bookmark(PUBLIC, "https://relif.example.org/app"),
+                         "https://relif.example.org/app/#server=" + PUBLIC)
+
+
+class ConfiguredOriginTest(ServerCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="relif-home-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = self.tmp / "home"
+        Store.init(self.home).close()
+        self.server = make_server(self.home, port=0, token=TOKEN, quiet=True,
+                                  frontend_url="https://relif.example.org/app/")
+        self.addCleanup(self.server.server_close)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+
+    def test_cors_origin_comes_from_frontend_url(self):
+        resp, _ = self.request("GET", "/health")
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "https://relif.example.org")
+        resp, _ = self.request("OPTIONS", "/health")
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "https://relif.example.org")
 
 
 class CliTest(unittest.TestCase):
@@ -201,11 +223,37 @@ class CliTest(unittest.TestCase):
         self.assertEqual((code, kw["public_url"]), (0, PUBLIC))
         self.assertIn(f"{PUBLIC}/pair?t=", out)
         self.assertNotIn("http://", out)
-        self.assertIn("https://tummala-hareesh.github.io/relif-demo/#server=" + PUBLIC, out)
+        self.assertIn(FRONTEND + "/#server=" + PUBLIC, out)
 
     def test_public_url_from_environment(self):
         self.assertEqual(self.serve(env={"RELIF_PUBLIC_URL": PUBLIC})[2]["public_url"], PUBLIC)
         self.assertIsNone(self.serve(env={"RELIF_PUBLIC_URL": ""})[2]["public_url"])
+
+    def test_serve_takes_bind_upload_cap_and_frontend_from_relif_yaml(self):
+        cfg = self.tmp / "relif.yaml"
+        cfg.write_text("backend:\n  bind: 0.0.0.0:9001\n  max_upload_mb: 3\n"
+                       "frontend:\n  url: https://relif.example.org/\n")
+        out = io.StringIO()
+        with mock.patch("relif.web.make_server") as ms, mock.patch("relif.web.lan_address", lambda: "10.0.0.2"), \
+                mock.patch("sys.stderr", io.StringIO()):
+            ms.return_value.server_address = ("0.0.0.0", 9001)
+            ms.return_value.token = "t" * 43
+            code = main(["--config", str(cfg), "--home", self.home, "serve"], out=out)
+        self.assertEqual(code, 0)
+        kw = ms.call_args.kwargs
+        self.assertEqual((kw["host"], kw["port"], kw["max_bytes"], kw["frontend_url"]),
+                         ("0.0.0.0", 9001, 3 * 1024 * 1024, "https://relif.example.org/"))
+
+    def test_flags_beat_relif_yaml(self):
+        cfg = self.tmp / "relif.yaml"
+        cfg.write_text("backend:\n  bind: 0.0.0.0:9001\n  max_upload_mb: 3\n")
+        with mock.patch("relif.web.make_server") as ms, mock.patch("sys.stderr", io.StringIO()):
+            ms.return_value.server_address = ("127.0.0.1", 8000)
+            ms.return_value.token = "t" * 43
+            main(["--config", str(cfg), "--home", self.home, "serve", "--host", "127.0.0.1", "--port", "8000",
+                  "--max-mb", "7"], out=io.StringIO())
+        kw = ms.call_args.kwargs
+        self.assertEqual((kw["host"], kw["port"], kw["max_bytes"]), ("127.0.0.1", 8000, 7 * 1024 * 1024))
 
     def test_bad_public_url_is_an_error(self):
         code, _, kw = self.serve("--public-url", "http://relif.ts.net")
@@ -223,30 +271,30 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class DockerFilesTest(unittest.TestCase):
     def test_image_runs_as_non_root_on_data(self):
-        text = (ROOT / "Dockerfile").read_text()
+        text = (ROOT / "backend/Dockerfile").read_text()
         self.assertIn("USER relif", text)
         self.assertIn("RELIF_HOME=/data", text)
         self.assertIn("/health", text)
         self.assertNotIn("requirements", text)  # stdlib only
 
     def test_compose_publishes_on_localhost_only(self):
-        text = (ROOT / "compose.yaml").read_text()
-        self.assertIn('"127.0.0.1:8765:8765"', text)
+        text = (ROOT / "backend/compose.yaml").read_text()
+        self.assertIn('"127.0.0.1:${RELIF_PORT:-8765}:8765"', text)
         self.assertIn("restart: unless-stopped", text)
         self.assertIn(":/data", text)
 
     def test_tailscale_sidecar_is_tailnet_only(self):
-        compose = (ROOT / "compose.tailscale.yaml").read_text()
+        compose = (ROOT / "backend/compose.tailscale.yaml").read_text()
         self.assertIn("ports: !reset []", compose)
         self.assertIn("network_mode: service:tailscale", compose)
         self.assertNotIn("funnel", compose.lower().replace("not `funnel`", ""))
-        serve = json.loads((ROOT / "tailscale/serve.json").read_text())
+        serve = json.loads((ROOT / "backend/tailscale/serve.json").read_text())
         self.assertEqual(serve["AllowFunnel"], {"${TS_CERT_DOMAIN}:443": False})
 
     def test_secrets_stay_out_of_git(self):
         ignored = (ROOT / ".gitignore").read_text().split()
         self.assertIn(".env", ignored)
-        self.assertRegex((ROOT / ".env.example").read_text(), r"(?m)^TS_AUTHKEY=$")
+        self.assertRegex((ROOT / "backend/.env.example").read_text(), r"(?m)^TS_AUTHKEY=$")
 
 
 if __name__ == "__main__":

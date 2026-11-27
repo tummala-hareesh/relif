@@ -1,58 +1,30 @@
-"""The "try the verdict" demo page: the pure decision tree as a static stlite (Streamlit-in-the-browser) page.
+#!/usr/bin/env python3
+"""Build the RELIF frontend: the "is it deductible?" page as one static stlite (Streamlit-in-the-browser) file.
 
-Only `verdict.py` and this adapter ship to the page. No ledger, no uploads, no browser storage: the answers
-never leave the browser. `python -m relif.demo build --out site` writes the static site for GitHub Pages.
-Owners who run `relif serve` at home get an "open my RELIF" link: their bookmark carries the server address in
-the URL fragment (`#server=https://relif.<tailnet>.ts.net`), so it is never sent to GitHub or baked into the build.
-Stdlib only; this file also runs inside Pyodide.
+Only `backend/relif/verdict.py`, the answer adapter `backend/relif/demo.py` and `frontend/app.py` ship to the page.
+No ledger, no uploads, no browser storage: the answers never leave the browser. Owners who run the backend at home
+get an "open my RELIF" link: their bookmark carries the server address in the URL fragment
+(`#server=https://relif.<tailnet>.ts.net`), so it is never sent to the host or baked into the build.
+
+    python3 frontend/build.py --out frontend/site      # what vercel.json runs
+
+Stdlib only, so Vercel's build image needs no `pip install`.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from dataclasses import fields
 from pathlib import Path
 
-from relif.verdict import Answers, decide, verdict_lines
-
+ROOT = Path(__file__).resolve().parent.parent
 STLITE_VERSION = "1.12.3"   # pinned @stlite/browser; bump deliberately and re-check on a phone
 PAGE_FILES = {               # path inside the page -> path in the repo
-    "app.py": "demo/app.py",
-    "relif/__init__.py": "relif/__init__.py",
-    "relif/verdict.py": "relif/verdict.py",
-    "relif/demo.py": "relif/demo.py",
+    "app.py": "frontend/app.py",
+    "relif/__init__.py": "backend/relif/__init__.py",
+    "relif/verdict.py": "backend/relif/verdict.py",
+    "relif/demo.py": "backend/relif/demo.py",
 }
-_INTS = {"rental_pct", "personal_pct"}
-_FIELDS = {f.name for f in fields(Answers)}
-
-
-def answers_from_form(form: dict) -> Answers:
-    """Widget values (strings, '' for not given) -> Answers. Raises ValueError on anything unexpected."""
-    unknown = set(form) - _FIELDS
-    if unknown:
-        raise ValueError(f"unknown answer(s): {', '.join(sorted(unknown))}")
-    values = {}
-    for key, value in form.items():
-        if value == "" or value is None:
-            continue
-        if key in _INTS and isinstance(value, str):
-            try:
-                value = int(value)
-            except ValueError:
-                raise ValueError(f"{key} must be a whole number from 0 to 100 (got {value!r})") from None
-        values[key] = value
-    return Answers(**values)
-
-
-def ask(form: dict) -> dict:
-    """Same verdict and text as `relif ask` for the same answers; errors come back as an 'error' outcome."""
-    try:
-        v = decide(answers_from_form(form))
-    except (ValueError, TypeError) as exc:
-        return {"outcome": "error", "label": str(exc), "lines": [str(exc)]}
-    return {"outcome": v.outcome, "label": v.label, "lines": verdict_lines(v)}
-
 
 _PAGE = """<!doctype html>
 <html lang="en">
@@ -117,14 +89,12 @@ def build_html(root: Path) -> str:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m relif.demo", description=__doc__.splitlines()[0])
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("build", help="write the static demo site (index.html) for GitHub Pages")
-    b.add_argument("--out", default="site")
+    parser = argparse.ArgumentParser(prog="frontend/build.py", description=__doc__.splitlines()[0])
+    parser.add_argument("--out", default=str(ROOT / "frontend" / "site"))
     args = parser.parse_args(argv)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "index.html").write_text(build_html(Path(__file__).resolve().parent.parent), encoding="utf-8")
+    (out / "index.html").write_text(build_html(ROOT), encoding="utf-8")
     (out / ".nojekyll").write_text("")
     print(f"wrote {out / 'index.html'}", file=sys.stderr)
     return 0

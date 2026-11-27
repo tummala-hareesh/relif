@@ -1,0 +1,17 @@
+# RELIF config: one file for the backend (your laptop), the frontend (the public page) and deploying them.
+# Precedence: command-line flag > environment ($RELIF_HOME, $RELIF_PUBLIC_URL) > this file > defaults.
+# `relif config` shows what is in effect; `relif deploy backend|frontend` deploys. This repo is public:
+# keep personal addresses (your tailnet name) in backend/.env, not here.
+
+backend:                    # the ledger + phone capture server; never leaves your machine
+  home: ~/.relif            # store folder (Docker always uses /data, bind-mounted from $RELIF_HOME)
+  bind: 127.0.0.1:8765      # host:port; Docker publishes this port on 127.0.0.1 only
+  public_url: ""            # https address when reached via Tailscale; usually RELIF_PUBLIC_URL in backend/.env
+  max_upload_mb: 20         # receipt upload cap
+
+frontend:                   # the static "is it deductible?" page (frontend/, built by frontend/build.py)
+  url: https://relif.vercel.app   # where it is deployed; its origin is the only one allowed to read /health
+
+deploy:
+  frontend: vercel          # vercel (deploys on push to main, preview per PR) | none
+  backend: docker           # docker | docker+tailscale | local (plain `relif serve`)

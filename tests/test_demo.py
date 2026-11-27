@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -14,6 +15,18 @@ from relif.cli import main
 from relif.verdict import CAPITAL, CURRENT, NOT_DEDUCTIBLE, PARTIAL, UNSURE
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_build():
+    """frontend/build.py is a script, not a package module."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("relif_frontend_build", ROOT / "frontend" / "build.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+build = load_build()
 
 # Golden table: every verdict branch, run through both `relif ask` and the demo page adapter.
 GOLDEN = [
@@ -127,15 +140,15 @@ class AskTest(unittest.TestCase):
 
 class PageTest(unittest.TestCase):
     def setUp(self):
-        self.html = demo.build_html(ROOT)
+        self.html = build.build_html(ROOT)
         m = re.search(r'<script type="application/json" id="relif-files">(.*?)</script>', self.html, re.S)
         self.assertIsNotNone(m)
         self.files = json.loads(m.group(1))
 
     def test_page_embeds_the_repo_sources_unchanged(self):
         self.assertEqual(set(self.files), {"app.py", "relif/__init__.py", "relif/verdict.py", "relif/demo.py"})
-        self.assertEqual(self.files["relif/verdict.py"], (ROOT / "relif/verdict.py").read_text())
-        self.assertEqual(self.files["app.py"], (ROOT / "demo/app.py").read_text())
+        self.assertEqual(self.files["relif/verdict.py"], (ROOT / "backend/relif/verdict.py").read_text())
+        self.assertEqual(self.files["app.py"], (ROOT / "frontend/app.py").read_text())
 
     def test_embedded_json_cannot_close_the_script_tag(self):
         self.assertEqual(self.html.count("</script>"), 3)   # home link, stlite mount, files
@@ -143,8 +156,8 @@ class PageTest(unittest.TestCase):
     def test_only_the_pinned_stlite_cdn_is_loaded(self):
         hosts = set(re.findall(r'https?://([^/"\'\s)]+)', self.html.split('id="relif-files"')[0]))
         self.assertEqual(hosts, {"cdn.jsdelivr.net"})
-        self.assertIn(f"@stlite/browser@{demo.STLITE_VERSION}/", self.html)
-        self.assertRegex(demo.STLITE_VERSION, r"^\d+\.\d+\.\d+$")
+        self.assertIn(f"@stlite/browser@{build.STLITE_VERSION}/", self.html)
+        self.assertRegex(build.STLITE_VERSION, r"^\d+\.\d+\.\d+$")
 
     def test_home_link_bakes_in_no_server_address(self):
         head = self.html.split('id="relif-files"')[0]
@@ -204,9 +217,27 @@ class PageTest(unittest.TestCase):
     def test_build_writes_index_html(self):
         out = Path(tempfile.mkdtemp(prefix="relif-site-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
-        self.assertEqual(demo.main(["build", "--out", str(out / "site")]), 0)
+        self.assertEqual(build.main(["--out", str(out / "site")]), 0)
         self.assertEqual((out / "site" / "index.html").read_text(), self.html)
         self.assertTrue((out / "site" / ".nojekyll").exists())
+
+    def test_build_script_is_stdlib_only_and_needs_no_install(self):
+        tree = ast.parse((ROOT / "frontend" / "build.py").read_text())
+        mods = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        mods |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+        self.assertLessEqual(mods, {"__future__", "argparse", "json", "sys", "pathlib"})
+
+    def test_build_runs_as_a_plain_script(self):
+        out = Path(tempfile.mkdtemp(prefix="relif-site-"))
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        r = subprocess.run([sys.executable, str(ROOT / "frontend" / "build.py"), "--out", str(out / "site")],
+                           capture_output=True, text=True, cwd=out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((out / "site" / "index.html").read_text(), self.html)
+
+    def test_adapter_no_longer_carries_the_page_builder(self):
+        self.assertFalse(hasattr(demo, "build_html"))
+        self.assertNotIn("<script", self.files["relif/demo.py"])
 
 
 if __name__ == "__main__":
@@ -251,7 +282,7 @@ class AppSmokeTest(unittest.TestCase):
         old = sys.modules.get("streamlit")
         sys.modules["streamlit"] = st
         try:
-            exec(compile((ROOT / "demo/app.py").read_text(), "app.py", "exec"), {"__name__": "__main__"})
+            exec(compile((ROOT / "frontend/app.py").read_text(), "app.py", "exec"), {"__name__": "__main__"})
         finally:
             if old is None:
                 del sys.modules["streamlit"]
