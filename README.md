@@ -76,5 +76,12 @@ python3 -m http.server -d site 8000           # open http://localhost:8000 (firs
 ```
 
 A golden test runs every row of the verdict table through both `relif ask` and the page adapter and
-requires identical text. Deploy: enable Pages (Source: GitHub Actions), then push a `demo-v*` tag
-(`.github/workflows/demo-pages.yml`). The site is public. Not tax advice.
+requires identical text.
+
+Live demo: <https://tummala-hareesh.github.io/relif-demo/> (public; not tax advice).
+
+Deploy: pushing a `demo-v*` tag runs `.github/workflows/demo-pages.yml`, which runs the tests, builds the site
+and pushes only `site/` (no history) to the `gh-pages` branch of the public `tummala-hareesh/relif-demo` repo.
+This repo stays private. One-time setup: create `relif-demo`, add an ed25519 deploy key with write access there,
+store its private key as the Actions secret `DEMO_DEPLOY_KEY` in this repo, and enable Pages on `relif-demo`
+(deploy from branch `gh-pages`, root). A failing test blocks the deploy.
