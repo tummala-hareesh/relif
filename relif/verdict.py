@@ -103,6 +103,12 @@ class Verdict:
         return self.outcome == CAPITAL
 
 
+def verdict_lines(v: Verdict) -> list:
+    """The verdict as text lines; `relif ask` and the demo page both print exactly these."""
+    return [v.label, f"  why: {v.reason}", *(f"  {note}" for note in v.assumptions),
+            f"  source: {v.citation}", f"  {v.disclaimer}"]
+
+
 def _cite(section: str) -> str:
     return f'{T4036}, "{section}" ({T4036_URL})'
 
