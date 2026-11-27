@@ -78,7 +78,7 @@ python3 -m http.server -d site 8000           # open http://localhost:8000 (firs
 A golden test runs every row of the verdict table through both `relif ask` and the page adapter and
 requires identical text.
 
-Live demo: <https://tummala-hareesh.github.io/relif-demo/> (public; not tax advice).
+Demo URL (live after the first `demo-v*` deploy): <https://tummala-hareesh.github.io/relif-demo/>. Public; not tax advice.
 
 Deploy: pushing a `demo-v*` tag runs `.github/workflows/demo-pages.yml`, which runs the tests, builds the site
 and pushes only `site/` (no history) to the `gh-pages` branch of the public `tummala-hareesh/relif-demo` repo.
