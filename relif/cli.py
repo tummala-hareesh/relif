@@ -159,19 +159,31 @@ def cmd_retention(args, out):
 
 
 def cmd_serve(args, out):
-    from .web import lan_address, make_server, pairing_token
+    from . import web
     if args.max_mb < 1:
         raise RelifError("--max-mb must be at least 1")
-    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    public = args.public_url if args.public_url is not None else os.environ.get("RELIF_PUBLIC_URL", "")
+    try:
+        public = web.validate_public_url(public) if public.strip() else None
+    except ValueError as exc:
+        raise RelifError(str(exc)) from None
+    host = args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
     with _open(args):  # fail fast before touching the store folder
         pass
-    token = pairing_token(_home(args), rotate=args.new_token)
-    server = make_server(_home(args), host=host, port=args.port, token=token, max_bytes=args.max_mb * 1024 * 1024)
-    shown = lan_address() if args.lan else "127.0.0.1"
-    print(f"RELIF capture page on http://{shown}:{server.server_address[1]}/", file=out)
-    print(f"Pair a device (keep this link private): http://{shown}:{server.server_address[1]}/pair?t={server.token}",
-          file=out)
-    if args.lan:
+    token = web.pairing_token(_home(args), rotate=args.new_token)
+    server = web.make_server(_home(args), host=host, port=args.port, token=token,
+                             max_bytes=args.max_mb * 1024 * 1024, public_url=public)
+    if public:
+        base = public
+    else:
+        shown = web.lan_address() if host in ("0.0.0.0", "::", "") else host
+        base = f"http://{f'[{shown}]' if ':' in shown else shown}:{server.server_address[1]}"
+    print(f"RELIF capture page on {base}/", file=out)
+    print(f"Pair a device (keep this link private): {base}/pair?t={server.token}", file=out)
+    if public:
+        print(f"Bookmark on your phone (the address stays in the link, never on GitHub): "
+              f"{web.pages_bookmark(public)}", file=out)
+    elif host not in ("127.0.0.1", "localhost", "::1"):
         print("Listening on your local network over plain HTTP: use it on trusted Wi-Fi or Tailscale only.",
               file=out)
     print("Ctrl-C to stop.", file=out, flush=True)
@@ -286,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sv = sub.add_parser("serve", help="local phone capture page (localhost unless --lan)")
     sv.add_argument("--lan", action="store_true", help="listen on the local network (home Wi-Fi / Tailscale)")
+    sv.add_argument("--host", help="bind address (overrides --lan; the Docker image uses 0.0.0.0)")
+    sv.add_argument("--public-url", help="https address the server is reached at (e.g. Tailscale serve); "
+                                         "default $RELIF_PUBLIC_URL. Secure cookie + Host check")
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--max-mb", type=int, default=20, help="upload size limit in MB")
     sv.add_argument("--new-token", action="store_true", help="rotate the pairing token (unpairs every device)")
