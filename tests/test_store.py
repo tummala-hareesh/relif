@@ -9,7 +9,7 @@ class InitTest(StoreTestCase):
     def test_layout_and_schema(self):
         self.assertTrue((self.home / "relif.db").exists())
         self.assertTrue((self.home / "receipts").is_dir())
-        self.assertEqual(self.store.conn.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(self.store.conn.execute("PRAGMA user_version").fetchone()[0], 2)
         self.assertEqual(self.store.conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(self.store.head(), (0, GENESIS))
 

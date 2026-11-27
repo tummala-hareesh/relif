@@ -142,8 +142,11 @@ def decide(a: Answers) -> Verdict:
         pct = a.rental_pct
         notes.append(f"assuming the rented share of the property is {a.rental_pct}%")
     if a.personal_pct:
-        pct = pct * (100 - a.personal_pct) // 100
+        pct = (pct * (100 - a.personal_pct) + 50) // 100  # whole percent, half-up
         notes.append(f"assuming {a.personal_pct}% of the purchase is personal")
+
+    if pct == 0:
+        return _no("none of it is for the rental", "Expenses you can deduct", notes)
 
     kind = a.kind
     if kind is None:

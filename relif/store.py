@@ -29,7 +29,7 @@ from typing import Callable, Iterable, Optional
 
 from .retention import retention
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 GENESIS = "0" * 64
 DB_NAME = "relif.db"
 ANCHORS = "anchors.log"
@@ -80,7 +80,8 @@ CREATE TABLE entries(
     retain_until TEXT,
     retention_rule TEXT,
     voided INTEGER NOT NULL DEFAULT 0,
-    void_reason TEXT
+    void_reason TEXT,
+    deductible_pct INTEGER
 );
 CREATE TABLE receipts(
     sha256 TEXT PRIMARY KEY,
@@ -102,7 +103,7 @@ CREATE INDEX entries_retain_until ON entries(retain_until);
 _DERIVED_TABLES = ("properties", "entries", "receipts", "entry_receipts")
 
 ENTRY_FIELDS = ("id", "date", "amount_cents", "vendor", "description", "property_id", "tax_year",
-                "category", "verdict", "is_capital", "cca_class", "filed_late_on", "on_hold")
+                "category", "verdict", "is_capital", "cca_class", "filed_late_on", "on_hold", "deductible_pct")
 PROPERTY_FIELDS = ("name", "address", "rented_pct", "acquired_on", "disposed_on")
 
 
@@ -166,6 +167,11 @@ class Store:
             raise RelifError(f"no RELIF store at {self.root} (run `relif init` first)")
         self.conn = self._connect(db)
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 1:  # v2 adds entries.deductible_pct (derived table only; the event log is unchanged)
+            with self.conn:
+                self.conn.execute("ALTER TABLE entries ADD COLUMN deductible_pct INTEGER")
+                self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            version = SCHEMA_VERSION
         if version != SCHEMA_VERSION:
             self.conn.close()
             raise RelifError(f"store schema version {version}, this RELIF expects {SCHEMA_VERSION}")
@@ -278,13 +284,16 @@ class Store:
     def add(self, *, amount_cents: int, date, vendor: str, description: str = None,
             property_id: int = None, tax_year: int = None, category: str = None, verdict: str = None,
             is_capital: bool = False, cca_class: str = None, filed_late_on=None, on_hold: bool = False,
-            receipts: Iterable = ()) -> int:
+            deductible_pct: Optional[int] = None, receipts: Iterable = ()) -> int:
         if not isinstance(amount_cents, int) or isinstance(amount_cents, bool):
             raise RelifError("amount must be integer cents")
         if abs(amount_cents) > MAX_CENTS:
             raise RelifError("amount is too large")
         if not vendor:
             raise RelifError("vendor is required")
+        if deductible_pct is not None and (not isinstance(deductible_pct, int) or isinstance(deductible_pct, bool)
+                                           or not 0 <= deductible_pct <= 100):
+            raise RelifError("deductible_pct must be a whole number from 0 to 100")
         day = _iso_date(date, "date")
         if day is None:
             raise RelifError("date is required")
@@ -303,6 +312,7 @@ class Store:
             "tax_year": year,
             "category": category, "verdict": verdict, "is_capital": bool(is_capital), "cca_class": cca_class,
             "filed_late_on": _iso_date(filed_late_on, "filed_late_on"), "on_hold": bool(on_hold),
+            "deductible_pct": deductible_pct,
         }
         stored = [self._store_receipt(p) for p in paths]  # files first: content-addressed, idempotent
         with self._tx():

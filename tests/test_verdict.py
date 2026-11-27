@@ -89,6 +89,14 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(v.deductible_pct, 40)
         self.assertIn("9949", v.reason)
 
+    def test_zero_share_is_not_deductible(self):
+        self.check(NOT_DEDUCTIBLE, kind="utilities", personal_pct=100)
+        self.check(NOT_DEDUCTIBLE, kind="appliance", use="shared", rental_pct=0)
+
+    def test_combined_share_rounds_half_up(self):
+        v = self.check(PARTIAL, kind="utilities", use="shared", rental_pct=33, personal_pct=50)
+        self.assertEqual(v.deductible_pct, 17)  # 16.5% -> 17%
+
     def test_rented_unit_ignores_property_pct(self):
         self.assertEqual(self.check(CURRENT, kind="repair", work="restores", use="rental",
                                     rental_pct=25).deductible_pct, 100)

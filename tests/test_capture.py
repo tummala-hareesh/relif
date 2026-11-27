@@ -40,6 +40,43 @@ class CaptureTest(StoreTestCase):
                           date="2026-03-04", vendor="Hardware Co")
         self.assertEqual(self.store.entry(eid)["category"], "Repairs and maintenance (8960)")
 
+    def test_partial_share_reaches_the_t776_summary(self):
+        import csv
+        from relif.export import export_year
+        pid = self.store.add_property("Duplex", rented_pct=50)
+        v = decide(answers_for(self.store, pid, kind="utilities", use="shared"))
+        eid = log_expense(self.store, v, amount_cents=12001, date="2026-02-01", vendor="Hydro", property_id=pid)
+        self.assertEqual(self.store.entry(eid)["deductible_pct"], 50)
+        no = decide(Answers(kind="penalty"))
+        self.assertEqual(self.store.entry(log_expense(self.store, no, amount_cents=500, date="2026-02-02",
+                                                      vendor="City"))["deductible_pct"], 0)
+        unsure = decide(Answers(kind="roof"))
+        self.assertIsNone(self.store.entry(log_expense(self.store, unsure, amount_cents=700, date="2026-02-03",
+                                                       vendor="Roofer"))["deductible_pct"])
+        out = export_year(self.store, 2026)
+        with open(out / "t776_summary.csv", newline="") as f:
+            rows = {r["category"]: r for r in csv.DictReader(f)}
+        self.assertEqual(rows["Utilities (9220)"]["total"], "60.01")       # 50% of 120.01, half-up
+        self.assertEqual(rows["Utilities (9220)"]["receipts_total"], "120.01")
+        self.assertNotIn("5.00", [r["receipts_total"] for r in rows.values()])  # not deductible: left out
+        self.assertEqual(rows["uncategorised"]["total"], "7.00")            # unsure: full amount, for review
+        with open(out / "ledger.csv", newline="") as f:
+            self.assertEqual([r["deductible_pct"] for r in csv.DictReader(f)], ["50", "0", ""])
+        self.assertTrue(self.store.verify().ok)
+
+    def test_v1_store_is_migrated_and_still_verifies(self):
+        import sqlite3
+        from relif.store import Store
+        self.store.add(amount_cents=100, date="2026-01-01", vendor="Old")
+        self.store.close()
+        conn = sqlite3.connect(str(self.home / "relif.db"))
+        conn.executescript("ALTER TABLE entries DROP COLUMN deductible_pct; PRAGMA user_version = 1;")
+        conn.close()
+        with Store(self.home) as s:
+            self.assertIsNone(s.entry(1)["deductible_pct"])
+            self.assertTrue(s.verify().ok)
+            self.assertEqual(s.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+
 
 class AskCliTest(unittest.TestCase):
     def setUp(self):
