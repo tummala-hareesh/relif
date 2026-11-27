@@ -2,6 +2,8 @@
 
 Only `verdict.py` and this adapter ship to the page. No ledger, no uploads, no browser storage: the answers
 never leave the browser. `python -m relif.demo build --out site` writes the static site for GitHub Pages.
+Owners who run `relif serve` at home get an "open my RELIF" link: their bookmark carries the server address in
+the URL fragment (`#server=https://relif.<tailnet>.ts.net`), so it is never sent to GitHub or baked into the build.
 Stdlib only; this file also runs inside Pyodide.
 """
 from __future__ import annotations
@@ -61,6 +63,38 @@ _PAGE = """<!doctype html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@{version}/build/stlite.css">
 </head>
 <body>
+<div id="relif-home" hidden style="font-family:sans-serif;padding:.6em 1em;background:#f3faf5;border-bottom:1px solid #cde"></div>
+<script>
+// relif-home: your own RELIF at home, from the #server=... fragment of your bookmark (an https *.ts.net address).
+function relifServer(hash) {{
+  const m = /^#(?:.*&)?server=([^&]*)/.exec(hash || "");
+  if (!m) return null;
+  let u;
+  try {{ u = new URL(decodeURIComponent(m[1])); }} catch (e) {{ return null; }}
+  if (u.protocol !== "https:" || u.username || u.password || !/^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.ts\\.net$/.test(u.hostname)) return null;
+  if ((u.pathname !== "/" && u.pathname !== "") || u.search || u.hash) return null;
+  return u.origin;
+}}
+(function () {{
+  const origin = relifServer(location.hash);
+  if (!origin) return;
+  const box = document.getElementById("relif-home");
+  const say = (text, link) => {{
+    box.textContent = text;
+    if (link) {{ const a = document.createElement("a"); a.href = origin + "/"; a.rel = "noreferrer";
+                 a.textContent = link; box.append(" ", a); }}
+    box.hidden = false;
+  }};
+  say("Checking your RELIF at home...");
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 3000);
+  fetch(origin + "/health", {{ mode: "cors", credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer",
+                              signal: stop.signal }})
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((j) => {{ if (j.ok !== true) throw new Error("bad health"); say("🟢 Your RELIF is online.", "Open my RELIF"); }})
+    .catch(() => say("😴 Your RELIF is not answering: the laptop is asleep or this phone is off your tailnet."));
+}})();
+</script>
 <noscript>This page runs Python in your browser and needs JavaScript.</noscript>
 <div id="root"><p style="font-family:sans-serif;padding:1em">Loading Python in your browser (first visit can
 take a few seconds)... Not tax advice. Nothing you enter leaves this page.</p></div>
